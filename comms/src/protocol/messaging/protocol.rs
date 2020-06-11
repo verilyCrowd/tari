@@ -25,28 +25,43 @@ use crate::{
     compat::IoCompat,
     connection_manager::{ConnectionManagerEvent, ConnectionManagerRequester},
     message::{InboundMessage, MessageTag, OutboundMessage},
+    multiplexing::Substream,
     peer_manager::{NodeId, NodeIdentity, Peer, PeerManagerError},
-    protocol::{messaging::outbound::OutboundMessaging, ProtocolEvent, ProtocolNotification},
-    runtime::current_executor,
-    types::CommsSubstream,
+    protocol::{
+        messaging::{inbound::InboundMessaging, outbound::OutboundMessaging},
+        ProtocolEvent,
+        ProtocolNotification,
+    },
+    runtime::task,
     PeerManager,
 };
 use bytes::Bytes;
-use derive_error::Error;
 use futures::{channel::mpsc, stream::Fuse, AsyncRead, AsyncWrite, SinkExt, StreamExt};
 use log::*;
 use std::{
     collections::{hash_map::Entry, HashMap},
     fmt,
     sync::Arc,
+    time::Duration,
 };
 use tari_shutdown::{Shutdown, ShutdownSignal};
-use tokio::{runtime, sync::broadcast};
+use thiserror::Error;
+use tokio::sync::broadcast;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 const LOG_TARGET: &str = "comms::protocol::messaging";
 pub static MESSAGING_PROTOCOL: Bytes = Bytes::from_static(b"/tari/messaging/0.1.0");
 const INTERNAL_MESSAGING_EVENT_CHANNEL_SIZE: usize = 50;
+/// The length of time that inactivity is allowed before closing the inbound/outbound substreams.
+/// Inbound/outbound substreams are closed independently, and they may be reopened in the future once closed.
+const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+/// The number of times to retry sending a failed message before publishing a SendMessageFailed event.
+/// This can be low because dialing a peer is already attempted a number of times.
+const MAX_SEND_RETRIES: usize = 1;
+/// The maximum amount of inbound messages to accept within the `RATE_LIMIT_RESTOCK_INTERVAL` window
+const RATE_LIMIT_CAPACITY: usize = 10;
+const RATE_LIMIT_RESTOCK_INTERVAL: Duration = Duration::from_millis(100);
+const MAX_FRAME_LENGTH: usize = 8 * 1_024 * 1_024;
 
 pub type MessagingEventSender = broadcast::Sender<Arc<MessagingEvent>>;
 pub type MessagingEventReceiver = broadcast::Receiver<Arc<MessagingEvent>>;
@@ -61,11 +76,11 @@ pub enum MessagingRequest {
 /// occurred
 #[derive(Debug, Error, Copy, Clone)]
 pub enum SendFailReason {
-    /// Dial was attempted, but failed
+    #[error("Dial was attempted, but failed")]
     PeerDialFailed,
-    /// Failed to open a messaging substream to peer
+    #[error("Failed to open a messaging substream to peer")]
     SubstreamOpenFailed,
-    /// Failed to send on substream channel
+    #[error("Failed to send on substream channel")]
     SubstreamSendFailed,
 }
 
@@ -90,11 +105,10 @@ impl fmt::Display for MessagingEvent {
 }
 
 pub struct MessagingProtocol {
-    executor: runtime::Handle,
     connection_manager_requester: ConnectionManagerRequester,
     node_identity: Arc<NodeIdentity>,
     peer_manager: Arc<PeerManager>,
-    proto_notification: Fuse<mpsc::Receiver<ProtocolNotification<CommsSubstream>>>,
+    proto_notification: Fuse<mpsc::Receiver<ProtocolNotification<Substream>>>,
     active_queues: HashMap<Box<NodeId>, mpsc::UnboundedSender<OutboundMessage>>,
     request_rx: Fuse<mpsc::Receiver<MessagingRequest>>,
     messaging_events_tx: MessagingEventSender,
@@ -104,7 +118,6 @@ pub struct MessagingProtocol {
     retry_queue_tx: mpsc::UnboundedSender<OutboundMessage>,
     retry_queue_rx: Fuse<mpsc::UnboundedReceiver<OutboundMessage>>,
     attempts: HashMap<MessageTag, usize>,
-    max_attempts: usize,
     shutdown_signal: Option<ShutdownSignal>,
     complete_trigger: Shutdown,
 }
@@ -115,11 +128,10 @@ impl MessagingProtocol {
         connection_manager_requester: ConnectionManagerRequester,
         peer_manager: Arc<PeerManager>,
         node_identity: Arc<NodeIdentity>,
-        proto_notification: mpsc::Receiver<ProtocolNotification<CommsSubstream>>,
+        proto_notification: mpsc::Receiver<ProtocolNotification<Substream>>,
         request_rx: mpsc::Receiver<MessagingRequest>,
         messaging_events_tx: MessagingEventSender,
         inbound_message_tx: mpsc::Sender<InboundMessage>,
-        max_attempts: usize,
         shutdown_signal: ShutdownSignal,
     ) -> Self
     {
@@ -127,7 +139,6 @@ impl MessagingProtocol {
             mpsc::channel(INTERNAL_MESSAGING_EVENT_CHANNEL_SIZE);
         let (retry_queue_tx, retry_queue_rx) = mpsc::unbounded();
         Self {
-            executor: current_executor(),
             connection_manager_requester,
             peer_manager,
             node_identity,
@@ -141,7 +152,6 @@ impl MessagingProtocol {
             retry_queue_rx: retry_queue_rx.fuse(),
             retry_queue_tx,
             shutdown_signal: Some(shutdown_signal),
-            max_attempts,
             attempts: Default::default(),
             complete_trigger: Shutdown::new(),
         }
@@ -196,7 +206,10 @@ impl MessagingProtocol {
 
     pub fn framed<TSubstream>(socket: TSubstream) -> Framed<IoCompat<TSubstream>, LengthDelimitedCodec>
     where TSubstream: AsyncRead + AsyncWrite + Unpin {
-        Framed::new(IoCompat::new(socket), LengthDelimitedCodec::new())
+        let codec = LengthDelimitedCodec::builder()
+            .max_frame_length(MAX_FRAME_LENGTH)
+            .new_codec();
+        Framed::new(IoCompat::new(socket), codec)
     }
 
     async fn handle_internal_messaging_event(&mut self, event: MessagingEvent) {
@@ -205,8 +218,8 @@ impl MessagingProtocol {
         match event {
             SendMessageFailed(out_msg, reason) => match self.attempts.entry(out_msg.tag) {
                 Entry::Occupied(mut entry) => match *entry.get() {
-                    n if n >= self.max_attempts => {
-                        warn!(
+                    n if n >= MAX_SEND_RETRIES => {
+                        debug!(
                             target: LOG_TARGET,
                             "Failed to send message '{}' to peer '{}' because '{}'.",
                             out_msg.tag,
@@ -226,7 +239,7 @@ impl MessagingProtocol {
                     },
                 },
                 Entry::Vacant(entry) => {
-                    if self.max_attempts == 0 {
+                    if MAX_SEND_RETRIES == 0 {
                         let _ = self
                             .messaging_events_tx
                             .send(Arc::new(SendMessageFailed(out_msg, reason)));
@@ -309,8 +322,6 @@ impl MessagingProtocol {
                 },
                 Entry::Vacant(entry) => {
                     let sender = Self::spawn_outbound_handler(
-                        self.executor.clone(),
-                        self.node_identity.clone(),
                         self.connection_manager_requester.clone(),
                         self.internal_messaging_event_tx.clone(),
                         peer_node_id.clone(),
@@ -338,88 +349,33 @@ impl MessagingProtocol {
     }
 
     async fn spawn_outbound_handler(
-        executor: runtime::Handle,
-        our_node_identity: Arc<NodeIdentity>,
         conn_man_requester: ConnectionManagerRequester,
         events_tx: mpsc::Sender<MessagingEvent>,
         peer_node_id: NodeId,
     ) -> Result<mpsc::UnboundedSender<OutboundMessage>, MessagingProtocolError>
     {
         let (msg_tx, msg_rx) = mpsc::unbounded();
-        executor.spawn(
-            OutboundMessaging::new(conn_man_requester, our_node_identity, events_tx, msg_rx, peer_node_id).run(),
-        );
+        let outbound_messaging =
+            OutboundMessaging::new(conn_man_requester, events_tx, msg_rx, peer_node_id, INACTIVITY_TIMEOUT);
+        task::spawn(outbound_messaging.run());
         Ok(msg_tx)
     }
 
-    async fn spawn_inbound_handler(&mut self, peer: Arc<Peer>, substream: CommsSubstream) {
+    async fn spawn_inbound_handler(&mut self, peer: Arc<Peer>, substream: Substream) {
         let messaging_events_tx = self.messaging_events_tx.clone();
-        let mut inbound_message_tx = self.inbound_message_tx.clone();
-        let mut framed_substream = Self::framed(substream);
-
-        self.executor.spawn(async move {
-            while let Some(result) = framed_substream.next().await {
-                match result {
-                    Ok(raw_msg) => {
-                        trace!(
-                            target: LOG_TARGET,
-                            "Received message from peer '{}' ({} bytes)",
-                            peer.node_id.short_str(),
-                            raw_msg.len()
-                        );
-
-                        let inbound_msg = InboundMessage::new(Arc::clone(&peer), raw_msg.freeze());
-
-                        let event = MessagingEvent::MessageReceived(
-                            Box::new(inbound_msg.source_peer.node_id.clone()),
-                            inbound_msg.tag,
-                        );
-
-                        if let Err(err) = inbound_message_tx.send(inbound_msg).await {
-                            warn!(
-                                target: LOG_TARGET,
-                                "Failed to send InboundMessage for peer '{}' because '{}'",
-                                peer.node_id.short_str(),
-                                err
-                            );
-
-                            if err.is_disconnected() {
-                                break;
-                            }
-                        }
-
-                        trace!(target: LOG_TARGET, "Inbound handler sending event '{}'", event);
-                        if let Err(err) = messaging_events_tx.send(Arc::new(event)) {
-                            debug!(
-                                target: LOG_TARGET,
-                                "Messaging event '{}' not sent for peer '{}' because there are no subscribers. \
-                                 MessagingEvent dropped",
-                                err.0,
-                                peer.node_id.short_str(),
-                            );
-                        }
-                    },
-                    Err(err) => {
-                        error!(
-                            target: LOG_TARGET,
-                            "Failed to receive from peer '{}' because '{}'",
-                            peer.node_id.short_str(),
-                            err
-                        );
-                        break;
-                    },
-                }
-            }
-
-            debug!(
-                target: LOG_TARGET,
-                "Inbound messaging handler for peer '{}' has stopped",
-                peer.node_id.short_str()
-            );
-        });
+        let inbound_message_tx = self.inbound_message_tx.clone();
+        let inbound_messaging = InboundMessaging::new(
+            peer,
+            inbound_message_tx,
+            messaging_events_tx,
+            RATE_LIMIT_CAPACITY,
+            RATE_LIMIT_RESTOCK_INTERVAL,
+            INACTIVITY_TIMEOUT,
+        );
+        task::spawn(inbound_messaging.run(substream));
     }
 
-    async fn handle_notification(&mut self, notification: ProtocolNotification<CommsSubstream>) {
+    async fn handle_notification(&mut self, notification: ProtocolNotification<Substream>) {
         debug_assert_eq!(notification.protocol, MESSAGING_PROTOCOL);
         match notification.event {
             // Peer negotiated to speak the messaging protocol with us
@@ -431,14 +387,13 @@ impl MessagingProtocol {
                 );
                 match self.peer_manager.find_by_node_id(&node_id).await {
                     Ok(peer) => {
-                        // For an inbound substream, read messages from the peer and forward on the incoming_messages
-                        // channel
+                        // For an inbound substream, read messages from the peer and forward on the
+                        // incoming_messages channel
                         self.spawn_inbound_handler(Arc::new(peer), substream).await;
                     },
                     Err(PeerManagerError::PeerNotFoundError) => {
                         // This should never happen if everything is working correctly
-
-                        error!(
+                        warn!(
                             target: LOG_TARGET,
                             "[ThisNode={}] *** Could not find verified node_id '{}' in peer list. This should not \
                              happen ***",
@@ -448,7 +403,7 @@ impl MessagingProtocol {
                     },
                     Err(err) => {
                         // This should never happen if everything is working correctly
-                        error!(
+                        warn!(
                             target: LOG_TARGET,
                             "Peer manager error when handling protocol notification: '{:?}'", err
                         );

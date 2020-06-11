@@ -38,11 +38,11 @@ use std::{
         Arc,
     },
 };
-use tokio::sync::broadcast;
+use tokio::{sync::broadcast, task};
 
-pub fn create_connection_manager_mock(buf_size: usize) -> (ConnectionManagerRequester, ConnectionManagerMock) {
-    let (tx, rx) = mpsc::channel(buf_size);
-    let (event_tx, _) = broadcast::channel(buf_size);
+pub fn create_connection_manager_mock() -> (ConnectionManagerRequester, ConnectionManagerMock) {
+    let (tx, rx) = mpsc::channel(10);
+    let (event_tx, _) = broadcast::channel(10);
     (
         ConnectionManagerRequester::new(tx, event_tx.clone()),
         ConnectionManagerMock::new(rx.fuse(), event_tx),
@@ -90,7 +90,7 @@ impl ConnectionManagerMockState {
     }
 
     #[allow(dead_code)]
-    pub fn publish_event(&mut self, event: ConnectionManagerEvent) {
+    pub fn publish_event(&self, event: ConnectionManagerEvent) {
         self.event_tx.send(Arc::new(event)).unwrap();
     }
 }
@@ -116,6 +116,10 @@ impl ConnectionManagerMock {
         self.state.clone()
     }
 
+    pub fn spawn(self) {
+        task::spawn(Self::run(self));
+    }
+
     pub async fn run(mut self) {
         while let Some(req) = self.receiver.next().await {
             self.handle_request(req).await;
@@ -129,18 +133,17 @@ impl ConnectionManagerMock {
         match req {
             DialPeer(node_id, reply_tx) => {
                 // Send Ok(conn) if we have an active connection, otherwise Err(DialConnectFailedAllAddresses)
-                reply_tx
-                    .send(
-                        self.state
-                            .active_conns
-                            .lock()
-                            .await
-                            .get(&node_id)
-                            .map(Clone::clone)
-                            .ok_or_else(|| ConnectionManagerError::DialConnectFailedAllAddresses),
-                    )
-                    .unwrap();
+                let _ = reply_tx.send(
+                    self.state
+                        .active_conns
+                        .lock()
+                        .await
+                        .get(&node_id)
+                        .map(Clone::clone)
+                        .ok_or_else(|| ConnectionManagerError::DialConnectFailedAllAddresses),
+                );
             },
+            CancelDial(_) => {},
             NotifyListening(_reply_tx) => {},
             GetActiveConnection(node_id, reply_tx) => {
                 reply_tx
@@ -152,9 +155,11 @@ impl ConnectionManagerMock {
                     .send(self.state.active_conns.lock().await.values().cloned().collect())
                     .unwrap();
             },
-            DisconnectPeer(node_id, reply_tx) => {
+            GetNumActiveConnections(reply_tx) => {
+                reply_tx.send(self.state.active_conns.lock().await.len()).unwrap();
+            },
+            DisconnectPeer(node_id) => {
                 let _ = self.state.active_conns.lock().await.remove(&node_id);
-                reply_tx.send(Ok(())).unwrap();
             },
         }
     }

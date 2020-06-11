@@ -20,7 +20,12 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use crate::output_manager_service::{error::OutputManagerStorageError, service::Balance, TxId};
+use crate::output_manager_service::{
+    error::OutputManagerStorageError,
+    service::Balance,
+    storage::models::DbUnblindedOutput,
+    TxId,
+};
 use chrono::{NaiveDateTime, Utc};
 use log::*;
 use std::{
@@ -32,7 +37,7 @@ use std::{
 use tari_core::transactions::{
     tari_amount::MicroTari,
     transaction::{OutputFeatures, UnblindedOutput},
-    types::{BlindingFactor, PrivateKey},
+    types::{BlindingFactor, CryptoFactories, PrivateKey},
 };
 
 const LOG_TARGET: &str = "wallet::output_manager_service::database";
@@ -56,8 +61,8 @@ pub trait OutputManagerBackend: Send + Sync {
     fn short_term_encumber_outputs(
         &self,
         tx_id: TxId,
-        outputs_to_send: &[UnblindedOutput],
-        change_output: Option<UnblindedOutput>,
+        outputs_to_send: &[DbUnblindedOutput],
+        outputs_to_receive: &[DbUnblindedOutput],
     ) -> Result<(), OutputManagerStorageError>;
     /// This method confirms that a transaction negotiation is complete and outputs can be fully encumbered. This
     /// reserves these outputs until the transaction is confirmed or cancelled
@@ -66,25 +71,28 @@ pub trait OutputManagerBackend: Send + Sync {
     /// transaction negotiation
     fn clear_short_term_encumberances(&self) -> Result<(), OutputManagerStorageError>;
     /// This method must take all the `outputs_to_be_spent` from the specified transaction and move them back into the
-    /// `UnspentOutputs` pool.
+    /// `UnspentOutputs` pool. The `outputs_to_be_received`'` will be marked as cancelled inbound outputs in case they
+    /// need to be recovered.
     fn cancel_pending_transaction(&self, tx_id: TxId) -> Result<(), OutputManagerStorageError>;
     /// This method must run through all the `PendingTransactionOutputs` and test if any have existed for longer that
     /// the specified duration. If they have they should be cancelled.
     fn timeout_pending_transactions(&self, period: Duration) -> Result<(), OutputManagerStorageError>;
-    /// This method will increment the currently stored key index for the key manager config. Increment this after eac
+    /// This method will increment the currently stored key index for the key manager config. Increment this after each
     /// key is generated
     fn increment_key_index(&self) -> Result<(), OutputManagerStorageError>;
     /// If an unspent output is detected as invalid (i.e. not available on the blockchain) then it should be moved to
-    /// the invalid outputs collection
-    fn invalidate_unspent_output(&self, output: &UnblindedOutput) -> Result<(), OutputManagerStorageError>;
+    /// the invalid outputs collection. The function will return the last recorded TxId associated with this output.
+    fn invalidate_unspent_output(&self, output: &DbUnblindedOutput) -> Result<Option<TxId>, OutputManagerStorageError>;
+    /// If an invalid output is found to be valid this function will turn it back into an unspent output
+    fn revalidate_unspent_output(&self, spending_key: &BlindingFactor) -> Result<(), OutputManagerStorageError>;
 }
 
 /// Holds the outputs that have been selected for a given pending transaction waiting for confirmation
 #[derive(Debug, Clone, PartialEq)]
 pub struct PendingTransactionOutputs {
     pub tx_id: u64,
-    pub outputs_to_be_spent: Vec<UnblindedOutput>,
-    pub outputs_to_be_received: Vec<UnblindedOutput>,
+    pub outputs_to_be_spent: Vec<DbUnblindedOutput>,
+    pub outputs_to_be_received: Vec<DbUnblindedOutput>,
     pub timestamp: NaiveDateTime,
 }
 
@@ -110,19 +118,19 @@ pub enum DbKey {
 
 #[derive(Debug)]
 pub enum DbValue {
-    SpentOutput(Box<UnblindedOutput>),
-    UnspentOutput(Box<UnblindedOutput>),
+    SpentOutput(Box<DbUnblindedOutput>),
+    UnspentOutput(Box<DbUnblindedOutput>),
     PendingTransactionOutputs(Box<PendingTransactionOutputs>),
-    UnspentOutputs(Vec<UnblindedOutput>),
-    SpentOutputs(Vec<UnblindedOutput>),
-    InvalidOutputs(Vec<UnblindedOutput>),
+    UnspentOutputs(Vec<DbUnblindedOutput>),
+    SpentOutputs(Vec<DbUnblindedOutput>),
+    InvalidOutputs(Vec<DbUnblindedOutput>),
     AllPendingTransactionOutputs(HashMap<TxId, PendingTransactionOutputs>),
     KeyManagerState(KeyManagerState),
 }
 
 pub enum DbKeyValuePair {
-    SpentOutput(BlindingFactor, Box<UnblindedOutput>),
-    UnspentOutput(BlindingFactor, Box<UnblindedOutput>),
+    SpentOutput(BlindingFactor, Box<DbUnblindedOutput>),
+    UnspentOutput(BlindingFactor, Box<DbUnblindedOutput>),
     PendingTransactionOutputs(TxId, Box<PendingTransactionOutputs>),
     KeyManagerState(KeyManagerState),
 }
@@ -192,11 +200,11 @@ where T: OutputManagerBackend + 'static
         Ok(())
     }
 
-    pub async fn add_unspent_output(&self, output: UnblindedOutput) -> Result<(), OutputManagerStorageError> {
+    pub async fn add_unspent_output(&self, output: DbUnblindedOutput) -> Result<(), OutputManagerStorageError> {
         let db_clone = self.db.clone();
         tokio::task::spawn_blocking(move || {
             db_clone.write(WriteOperation::Insert(DbKeyValuePair::UnspentOutput(
-                output.spending_key.clone(),
+                output.unblinded_output.spending_key.clone(),
                 Box::new(output),
             )))
         })
@@ -229,7 +237,9 @@ where T: OutputManagerBackend + 'static
         .or_else(|err| Err(OutputManagerStorageError::BlockingTaskSpawnError(err.to_string())))??;
         if let DbValue::UnspentOutputs(uo) = unspent_outputs {
             if let DbValue::AllPendingTransactionOutputs(pto) = pending_txs {
-                let available_balance = uo.iter().fold(MicroTari::from(0), |acc, x| acc + x.value);
+                let available_balance = uo
+                    .iter()
+                    .fold(MicroTari::from(0), |acc, x| acc + x.unblinded_output.value);
                 let mut pending_incoming = MicroTari::from(0);
                 let mut pending_outgoing = MicroTari::from(0);
 
@@ -237,11 +247,11 @@ where T: OutputManagerBackend + 'static
                     pending_incoming += v
                         .outputs_to_be_received
                         .iter()
-                        .fold(MicroTari::from(0), |acc, x| acc + x.value);
+                        .fold(MicroTari::from(0), |acc, x| acc + x.unblinded_output.value);
                     pending_outgoing += v
                         .outputs_to_be_spent
                         .iter()
-                        .fold(MicroTari::from(0), |acc, x| acc + x.value);
+                        .fold(MicroTari::from(0), |acc, x| acc + x.unblinded_output.value);
                 }
 
                 return Ok(Balance {
@@ -306,20 +316,25 @@ where T: OutputManagerBackend + 'static
         amount: MicroTari,
         spending_key: PrivateKey,
         output_features: OutputFeatures,
+        factory: &CryptoFactories,
     ) -> Result<(), OutputManagerStorageError>
     {
         let db_clone = self.db.clone();
+        let output = DbUnblindedOutput::from_unblinded_output(
+            UnblindedOutput {
+                value: amount,
+                spending_key: spending_key.clone(),
+                features: output_features,
+            },
+            factory,
+        )?;
         tokio::task::spawn_blocking(move || {
             db_clone.write(WriteOperation::Insert(DbKeyValuePair::PendingTransactionOutputs(
                 tx_id,
                 Box::new(PendingTransactionOutputs {
                     tx_id,
                     outputs_to_be_spent: Vec::new(),
-                    outputs_to_be_received: vec![UnblindedOutput {
-                        value: amount,
-                        spending_key: spending_key.clone(),
-                        features: output_features,
-                    }],
+                    outputs_to_be_received: vec![output],
                     timestamp: Utc::now().naive_utc(),
                 }),
             )))
@@ -334,13 +349,13 @@ where T: OutputManagerBackend + 'static
     pub async fn encumber_outputs(
         &self,
         tx_id: TxId,
-        outputs_to_send: Vec<UnblindedOutput>,
-        change_output: Option<UnblindedOutput>,
+        outputs_to_send: Vec<DbUnblindedOutput>,
+        outputs_to_receive: Vec<DbUnblindedOutput>,
     ) -> Result<(), OutputManagerStorageError>
     {
         let db_clone = self.db.clone();
         tokio::task::spawn_blocking(move || {
-            db_clone.short_term_encumber_outputs(tx_id, &outputs_to_send, change_output)
+            db_clone.short_term_encumber_outputs(tx_id, &outputs_to_send, &outputs_to_receive)
         })
         .await
         .or_else(|err| Err(OutputManagerStorageError::BlockingTaskSpawnError(err.to_string())))
@@ -387,7 +402,7 @@ where T: OutputManagerBackend + 'static
             .and_then(|inner_result| inner_result)
     }
 
-    pub async fn fetch_sorted_unspent_outputs(&self) -> Result<Vec<UnblindedOutput>, OutputManagerStorageError> {
+    pub async fn fetch_sorted_unspent_outputs(&self) -> Result<Vec<DbUnblindedOutput>, OutputManagerStorageError> {
         let db_clone = self.db.clone();
 
         let mut uo = tokio::task::spawn_blocking(move || match db_clone.fetch(&DbKey::UnspentOutputs) {
@@ -406,7 +421,7 @@ where T: OutputManagerBackend + 'static
         Ok(uo)
     }
 
-    pub async fn fetch_spent_outputs(&self) -> Result<Vec<UnblindedOutput>, OutputManagerStorageError> {
+    pub async fn fetch_spent_outputs(&self) -> Result<Vec<DbUnblindedOutput>, OutputManagerStorageError> {
         let db_clone = self.db.clone();
 
         let uo = tokio::task::spawn_blocking(move || match db_clone.fetch(&DbKey::SpentOutputs) {
@@ -444,7 +459,7 @@ where T: OutputManagerBackend + 'static
         Ok(uo)
     }
 
-    pub async fn get_unspent_outputs(&self) -> Result<Vec<UnblindedOutput>, OutputManagerStorageError> {
+    pub async fn get_unspent_outputs(&self) -> Result<Vec<DbUnblindedOutput>, OutputManagerStorageError> {
         let db_clone = self.db.clone();
 
         let uo = tokio::task::spawn_blocking(move || match db_clone.fetch(&DbKey::UnspentOutputs) {
@@ -461,7 +476,7 @@ where T: OutputManagerBackend + 'static
         Ok(uo)
     }
 
-    pub async fn get_invalid_outputs(&self) -> Result<Vec<UnblindedOutput>, OutputManagerStorageError> {
+    pub async fn get_invalid_outputs(&self) -> Result<Vec<DbUnblindedOutput>, OutputManagerStorageError> {
         let db_clone = self.db.clone();
 
         let uo = tokio::task::spawn_blocking(move || match db_clone.fetch(&DbKey::InvalidOutputs) {
@@ -478,9 +493,21 @@ where T: OutputManagerBackend + 'static
         Ok(uo)
     }
 
-    pub async fn invalidate_output(&self, output: UnblindedOutput) -> Result<(), OutputManagerStorageError> {
+    pub async fn invalidate_output(
+        &self,
+        output: DbUnblindedOutput,
+    ) -> Result<Option<TxId>, OutputManagerStorageError>
+    {
         let db_clone = self.db.clone();
         tokio::task::spawn_blocking(move || db_clone.invalidate_unspent_output(&output))
+            .await
+            .or_else(|err| Err(OutputManagerStorageError::BlockingTaskSpawnError(err.to_string())))
+            .and_then(|inner_result| inner_result)
+    }
+
+    pub async fn revalidate_output(&self, spending_key: BlindingFactor) -> Result<(), OutputManagerStorageError> {
+        let db_clone = self.db.clone();
+        tokio::task::spawn_blocking(move || db_clone.revalidate_unspent_output(&spending_key))
             .await
             .or_else(|err| Err(OutputManagerStorageError::BlockingTaskSpawnError(err.to_string())))
             .and_then(|inner_result| inner_result)

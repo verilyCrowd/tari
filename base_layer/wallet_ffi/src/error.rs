@@ -208,6 +208,10 @@ impl From<WalletError> for LibWalletError {
                 code: 301,
                 message: format!("{:?}", w),
             },
+            WalletError::StoreAndForwardError(_) => Self {
+                code: 302,
+                message: format!("{:?}", w),
+            },
             WalletError::ContactsServiceError(ContactsServiceError::ContactNotFound) => Self {
                 code: 401,
                 message: format!("{:?}", w),
@@ -281,15 +285,12 @@ impl From<NodeIdentityError> for LibWalletError {
                 code: 701,
                 message: format!("{:?}", n),
             },
-            NodeIdentityError::NodeIdError(NodeIdError::OutOfBounds) => Self {
-                code: 702,
-                message: format!("{:?}", n),
-            },
-            NodeIdentityError::PoisonedAccess => Self {
+            // 702 NodeIdError::OutOfBounds no longer occurs
+            NodeIdentityError::AddressLockPoisoned => Self {
                 code: 703,
                 message: format!("{:?}", n),
             },
-            NodeIdentityError::NodeIdError(NodeIdError::DigestError) => Self {
+            NodeIdentityError::NodeIdError(NodeIdError::InvalidDigestOutputSize) => Self {
                 code: 704,
                 message: format!("{:?}", n),
             },

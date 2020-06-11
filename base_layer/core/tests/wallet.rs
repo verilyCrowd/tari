@@ -115,6 +115,30 @@ fn wallet_base_node_integration_test() {
         base_node_identity.node_id().short_str()
     );
 
+    // Base Node Setup
+    let mut base_node_runtime = create_runtime();
+    let network = Network::LocalNet;
+    let consensus_constants = ConsensusConstantsBuilder::new(network)
+        .with_emission_amounts(100_000_000.into(), 0.999, 100.into())
+        .build();
+    let (block0, utxo0) =
+        create_genesis_block_with_coinbase_value(&factories, 100_000_000.into(), &consensus_constants);
+    let consensus_manager = ConsensusManagerBuilder::new(network)
+        .with_consensus_constants(consensus_constants)
+        .with_block(block0.clone())
+        .build();
+    let (base_node, _consensus_manager) = BaseNodeBuilder::new(network)
+        .with_node_identity(base_node_identity.clone())
+        .with_peers(vec![bob_node_identity.clone(), alice_node_identity.clone()])
+        .with_base_node_service_config(BaseNodeServiceConfig::default())
+        .with_mmr_cache_config(MmrCacheConfig { rewind_hist_len: 10 })
+        .with_mempool_service_config(MempoolServiceConfig::default())
+        .with_liveness_service_config(LivenessConfig::default())
+        .with_consensus_manager(consensus_manager.clone())
+        .start(&mut base_node_runtime, temp_dir.path().to_str().unwrap());
+
+    log::info!("Finished Starting Base Node");
+
     // Alice Wallet setup
     let alice_comms_config = CommsConfig {
         node_identity: alice_node_identity.clone(),
@@ -206,38 +230,23 @@ fn wallet_base_node_integration_test() {
 
     log::info!("Finished Starting Wallets");
 
-    // Base Node Setup
-    let mut base_node_runtime = create_runtime();
-    let network = Network::LocalNet;
-    let consensus_constants = ConsensusConstantsBuilder::new(network)
-        .with_emission_amounts(100_000_000.into(), 0.999, 100.into())
-        .build();
-    let (block0, utxo0) =
-        create_genesis_block_with_coinbase_value(&factories, 100_000_000.into(), &consensus_constants);
-    let consensus_manager = ConsensusManagerBuilder::new(network)
-        .with_consensus_constants(consensus_constants)
-        .with_block(block0.clone())
-        .build();
-    let (base_node, _consensus_manager) = BaseNodeBuilder::new(network)
-        .with_node_identity(base_node_identity.clone())
-        .with_peers(vec![bob_node_identity.clone(), alice_node_identity.clone()])
-        .with_base_node_service_config(BaseNodeServiceConfig::default())
-        .with_mmr_cache_config(MmrCacheConfig { rewind_hist_len: 10 })
-        .with_mempool_service_config(MempoolServiceConfig::default())
-        .with_liveness_service_config(LivenessConfig::default())
-        .with_consensus_manager(consensus_manager.clone())
-        .start(&mut base_node_runtime, temp_dir.path().to_str().unwrap());
-
-    log::info!("Finished Starting Base Node");
-
     // Transaction
     let mut runtime = create_runtime();
     alice_wallet
         .runtime
         .block_on(alice_wallet.output_manager_service.add_output(utxo0))
         .unwrap();
-    let value = MicroTari::from(1000);
+    alice_wallet
+        .runtime
+        .block_on(
+            alice_wallet
+                .comms
+                .connectivity()
+                .wait_for_connectivity(Duration::from_secs(10)),
+        )
+        .unwrap();
 
+    let value = MicroTari::from(1000);
     alice_wallet
         .runtime
         .block_on(alice_wallet.transaction_service.send_transaction(
@@ -292,8 +301,9 @@ fn wallet_base_node_integration_test() {
     let mut shutdown = Shutdown::new();
     let mut miner = Miner::new(shutdown.to_signal(), consensus_manager, &base_node.local_nci, 1);
     miner.enable_mining_flag().store(true, Ordering::Relaxed);
-    let (mut state_event_sender, state_event_receiver): (Publisher<_>, Subscriber<_>) = bounded(1);
-    miner.subscribe_to_state_change(state_event_receiver);
+    let (mut state_event_sender, state_event_receiver): (Publisher<_>, Subscriber<_>) = bounded(1, 113);
+    miner.subscribe_to_node_state_events(state_event_receiver);
+    miner.subscribe_to_mempool_state_events(base_node.local_mp_interface.get_mempool_state_event_stream());
     let miner_utxo_stream = miner.get_utxo_receiver_channel().fuse();
     runtime.spawn(async move {
         miner.mine().await;

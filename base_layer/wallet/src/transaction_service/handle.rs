@@ -24,7 +24,6 @@ use crate::{
     output_manager_service::TxId,
     transaction_service::{
         error::TransactionServiceError,
-        service::PendingCoinbaseSpendingKey,
         storage::database::{CompletedTransaction, InboundTransaction, OutboundTransaction},
     },
 };
@@ -41,13 +40,15 @@ pub enum TransactionServiceRequest {
     GetPendingInboundTransactions,
     GetPendingOutboundTransactions,
     GetCompletedTransactions,
+    GetCancelledPendingInboundTransactions,
+    GetCancelledPendingOutboundTransactions,
+    GetCancelledCompletedTransactions,
+    GetCompletedTransaction(TxId),
     SetBaseNodePublicKey(CommsPublicKey),
     SendTransaction((CommsPublicKey, MicroTari, MicroTari, String)),
     CancelTransaction(TxId),
-    RequestCoinbaseSpendingKey((MicroTari, u64)),
-    CompleteCoinbaseTransaction((TxId, Transaction)),
-    CancelPendingCoinbaseTransaction(TxId),
     ImportUtxo(MicroTari, CommsPublicKey, String),
+    SubmitTransaction((TxId, Transaction, MicroTari, MicroTari, String)),
     #[cfg(feature = "test_harness")]
     CompletePendingOutboundTransaction(CompletedTransaction),
     #[cfg(feature = "test_harness")]
@@ -66,19 +67,17 @@ impl fmt::Display for TransactionServiceRequest {
             Self::GetPendingInboundTransactions => f.write_str("GetPendingInboundTransactions"),
             Self::GetPendingOutboundTransactions => f.write_str("GetPendingOutboundTransactions"),
             Self::GetCompletedTransactions => f.write_str("GetCompletedTransactions"),
+            Self::GetCancelledPendingInboundTransactions => f.write_str("GetCancelledPendingInboundTransactions"),
+            Self::GetCancelledPendingOutboundTransactions => f.write_str("GetCancelledPendingOutboundTransactions"),
+            Self::GetCancelledCompletedTransactions => f.write_str("GetCancelledCompletedTransactions"),
+            Self::GetCompletedTransaction(t) => f.write_str(&format!("GetCompletedTransaction({})", t)),
             Self::SetBaseNodePublicKey(k) => f.write_str(&format!("SetBaseNodePublicKey ({})", k)),
             Self::SendTransaction((k, v, _, msg)) => {
                 f.write_str(&format!("SendTransaction (to {}, {}, {})", k, v, msg))
             },
             Self::CancelTransaction(t) => f.write_str(&format!("CancelTransaction ({})", t)),
-            Self::RequestCoinbaseSpendingKey((v, h)) => {
-                f.write_str(&format!("RequestCoinbaseSpendingKey ({}, maturity={})", v, h))
-            },
-            Self::CompleteCoinbaseTransaction((id, _)) => f.write_str(&format!("CompleteCoinbaseTransaction ({})", id)),
-            Self::CancelPendingCoinbaseTransaction(id) => {
-                f.write_str(&format!("CancelPendingCoinbaseTransaction ({}) ", id))
-            },
             Self::ImportUtxo(v, k, msg) => f.write_str(&format!("ImportUtxo (from {}, {}, {})", k, v, msg)),
+            Self::SubmitTransaction((id, _, _, _, _)) => f.write_str(&format!("SubmitTransaction ({})", id)),
             #[cfg(feature = "test_harness")]
             Self::CompletePendingOutboundTransaction(tx) => {
                 f.write_str(&format!("CompletePendingOutboundTransaction ({})", tx.tx_id))
@@ -105,11 +104,10 @@ pub enum TransactionServiceResponse {
     PendingInboundTransactions(HashMap<u64, InboundTransaction>),
     PendingOutboundTransactions(HashMap<u64, OutboundTransaction>),
     CompletedTransactions(HashMap<u64, CompletedTransaction>),
-    CoinbaseKey(PendingCoinbaseSpendingKey),
-    CompletedCoinbaseTransactionReceived,
-    CoinbaseTransactionCancelled,
+    CompletedTransaction(CompletedTransaction),
     BaseNodePublicKeySet,
     UtxoImported(TxId),
+    TransactionSubmitted,
     #[cfg(feature = "test_harness")]
     CompletedPendingTransaction,
     #[cfg(feature = "test_harness")]
@@ -211,12 +209,38 @@ impl TransactionServiceHandle {
         }
     }
 
+    pub async fn get_cancelled_pending_inbound_transactions(
+        &mut self,
+    ) -> Result<HashMap<u64, InboundTransaction>, TransactionServiceError> {
+        match self
+            .handle
+            .call(TransactionServiceRequest::GetCancelledPendingInboundTransactions)
+            .await??
+        {
+            TransactionServiceResponse::PendingInboundTransactions(p) => Ok(p),
+            _ => Err(TransactionServiceError::UnexpectedApiResponse),
+        }
+    }
+
     pub async fn get_pending_outbound_transactions(
         &mut self,
     ) -> Result<HashMap<u64, OutboundTransaction>, TransactionServiceError> {
         match self
             .handle
             .call(TransactionServiceRequest::GetPendingOutboundTransactions)
+            .await??
+        {
+            TransactionServiceResponse::PendingOutboundTransactions(p) => Ok(p),
+            _ => Err(TransactionServiceError::UnexpectedApiResponse),
+        }
+    }
+
+    pub async fn get_cancelled_pending_outbound_transactions(
+        &mut self,
+    ) -> Result<HashMap<u64, OutboundTransaction>, TransactionServiceError> {
+        match self
+            .handle
+            .call(TransactionServiceRequest::GetCancelledPendingOutboundTransactions)
             .await??
         {
             TransactionServiceResponse::PendingOutboundTransactions(p) => Ok(p),
@@ -237,51 +261,30 @@ impl TransactionServiceHandle {
         }
     }
 
-    pub async fn request_coinbase_key(
+    pub async fn get_cancelled_completed_transactions(
         &mut self,
-        amount: MicroTari,
-        maturity_height: u64,
-    ) -> Result<PendingCoinbaseSpendingKey, TransactionServiceError>
-    {
+    ) -> Result<HashMap<u64, CompletedTransaction>, TransactionServiceError> {
         match self
             .handle
-            .call(TransactionServiceRequest::RequestCoinbaseSpendingKey((
-                amount,
-                maturity_height,
-            )))
+            .call(TransactionServiceRequest::GetCancelledCompletedTransactions)
             .await??
         {
-            TransactionServiceResponse::CoinbaseKey(c) => Ok(c),
+            TransactionServiceResponse::CompletedTransactions(c) => Ok(c),
             _ => Err(TransactionServiceError::UnexpectedApiResponse),
         }
     }
 
-    pub async fn complete_coinbase_transaction(
+    pub async fn get_completed_transaction(
         &mut self,
         tx_id: TxId,
-        completed_transaction: Transaction,
-    ) -> Result<(), TransactionServiceError>
+    ) -> Result<CompletedTransaction, TransactionServiceError>
     {
         match self
             .handle
-            .call(TransactionServiceRequest::CompleteCoinbaseTransaction((
-                tx_id,
-                completed_transaction,
-            )))
+            .call(TransactionServiceRequest::GetCompletedTransaction(tx_id))
             .await??
         {
-            TransactionServiceResponse::CompletedCoinbaseTransactionReceived => Ok(()),
-            _ => Err(TransactionServiceError::UnexpectedApiResponse),
-        }
-    }
-
-    pub async fn cancel_coinbase_transaction(&mut self, tx_id: TxId) -> Result<(), TransactionServiceError> {
-        match self
-            .handle
-            .call(TransactionServiceRequest::CancelPendingCoinbaseTransaction(tx_id))
-            .await??
-        {
-            TransactionServiceResponse::CoinbaseTransactionCancelled => Ok(()),
+            TransactionServiceResponse::CompletedTransaction(t) => Ok(t),
             _ => Err(TransactionServiceError::UnexpectedApiResponse),
         }
     }
@@ -318,6 +321,27 @@ impl TransactionServiceHandle {
             .await??
         {
             TransactionServiceResponse::UtxoImported(tx_id) => Ok(tx_id),
+            _ => Err(TransactionServiceError::UnexpectedApiResponse),
+        }
+    }
+
+    pub async fn submit_transaction(
+        &mut self,
+        tx_id: u64,
+        tx: Transaction,
+        fee: MicroTari,
+        amount: MicroTari,
+        message: String,
+    ) -> Result<(), TransactionServiceError>
+    {
+        match self
+            .handle
+            .call(TransactionServiceRequest::SubmitTransaction((
+                tx_id, tx, fee, amount, message,
+            )))
+            .await??
+        {
+            TransactionServiceResponse::TransactionSubmitted => Ok(()),
             _ => Err(TransactionServiceError::UnexpectedApiResponse),
         }
     }

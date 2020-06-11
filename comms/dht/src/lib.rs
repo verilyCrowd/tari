@@ -125,6 +125,8 @@ pub use actor::{DhtActorError, DhtRequest, DhtRequester};
 mod builder;
 pub use builder::DhtBuilder;
 
+mod connectivity;
+
 mod config;
 pub use config::DhtConfig;
 
@@ -132,7 +134,7 @@ mod consts;
 mod crypt;
 
 mod dht;
-pub use dht::Dht;
+pub use dht::{Dht, DhtInitializationError};
 
 mod discovery;
 pub use discovery::DhtDiscoveryRequester;

@@ -47,7 +47,7 @@ use tari_comms::{
     types::CommsPublicKey,
     CommsNode,
 };
-use tari_comms_dht::Dht;
+use tari_comms_dht::{store_forward::StoreAndForwardRequester, Dht};
 use tari_core::transactions::{
     tari_amount::MicroTari,
     transaction::{OutputFeatures, UnblindedOutput},
@@ -90,6 +90,7 @@ where
 {
     pub comms: CommsNode,
     pub dht_service: Dht,
+    pub store_and_forward_requester: StoreAndForwardRequester,
     pub liveness_service: LivenessHandle,
     pub output_manager_service: OutputManagerHandle,
     pub transaction_service: TransactionServiceHandle,
@@ -112,7 +113,7 @@ where
     W: ContactsBackend + 'static,
 {
     pub fn new(
-        config: WalletConfig,
+        mut config: WalletConfig,
         mut runtime: Runtime,
         wallet_backend: T,
         transaction_backend: U,
@@ -127,22 +128,20 @@ where
         let transaction_backend_handle = transaction_backend.clone();
 
         let factories = config.factories;
-        let (publisher, subscription_factory) = pubsub_connector(
-            runtime.handle().clone(),
-            config.comms_config.max_concurrent_inbound_tasks,
-        );
+        let (publisher, subscription_factory) = pubsub_connector(runtime.handle().clone(), 100);
         let subscription_factory = Arc::new(subscription_factory);
 
-        let (comms, dht) = runtime.block_on(initialize_comms(config.comms_config.clone(), publisher))?;
+        // Wallet should join the network
+        config.comms_config.dht.auto_join = true;
+        let (comms, dht) = runtime.block_on(initialize_comms(config.comms_config.clone(), publisher, vec![]))?;
 
         let fut = StackBuilder::new(runtime.handle().clone(), comms.shutdown_signal())
             .add_initializer(CommsOutboundServiceInitializer::new(dht.outbound_requester()))
             .add_initializer(LivenessInitializer::new(
                 LivenessConfig {
                     auto_ping_interval: Some(Duration::from_secs(30)),
-                    enable_auto_join: true,
-                    enable_auto_stored_message_request: true,
-                    refresh_neighbours_interval: Default::default(),
+                    useragent: format!("tari/wallet/{}", env!("CARGO_PKG_VERSION")),
+                    ..Default::default()
                 },
                 Arc::clone(&subscription_factory),
                 dht.dht_requester(),
@@ -183,9 +182,12 @@ where
             runtime.block_on(output_manager_handle.set_base_node_public_key(p.public_key.clone()))?;
         }
 
+        let store_and_forward_requester = dht.store_and_forward_requester();
+
         Ok(Wallet {
             comms,
             dht_service: dht,
+            store_and_forward_requester,
             liveness_service: liveness_handle,
             output_manager_service: output_manager_handle,
             transaction_service: transaction_service_handle,
@@ -229,6 +231,8 @@ where
 
         self.runtime
             .block_on(self.comms.peer_manager().add_peer(peer.clone()))?;
+        self.runtime
+            .block_on(self.comms.connectivity().add_managed_peers(vec![peer.node_id.clone()]))?;
         self.runtime.block_on(
             self.transaction_service
                 .set_base_node_public_key(peer.public_key.clone()),
@@ -256,7 +260,7 @@ where
             .block_on(self.output_manager_service.add_output(unblinded_output.clone()))?;
 
         let tx_id = self.runtime.block_on(self.transaction_service.import_utxo(
-            amount.clone(),
+            amount,
             source_public_key.clone(),
             message,
         ))?;
@@ -300,9 +304,44 @@ where
     /// Have all the wallet components that need to start a sync process with the set base node to confirm the wallets
     /// state is accurately reflected on the blockchain
     pub fn sync_with_base_node(&mut self) -> Result<u64, WalletError> {
+        self.runtime
+            .block_on(self.store_and_forward_requester.request_saf_messages_from_neighbours())?;
+
         let request_key = self
             .runtime
             .block_on(self.output_manager_service.sync_with_base_node())?;
         Ok(request_key)
+    }
+
+    /// Do a coin split
+    pub fn coin_split(
+        &mut self,
+        amount_per_split: MicroTari,
+        split_count: usize,
+        fee_per_gram: MicroTari,
+        message: String,
+        lock_height: Option<u64>,
+    ) -> Result<TxId, WalletError>
+    {
+        let coin_split_tx = self.runtime.block_on(self.output_manager_service.create_coin_split(
+            amount_per_split,
+            split_count,
+            fee_per_gram,
+            lock_height,
+        ));
+
+        match coin_split_tx {
+            Ok((tx_id, split_tx, amount, fee)) => {
+                let coin_tx = self.runtime.block_on(
+                    self.transaction_service
+                        .submit_transaction(tx_id, split_tx, fee, amount, message),
+                );
+                match coin_tx {
+                    Ok(_) => Ok(tx_id),
+                    Err(e) => Err(WalletError::TransactionServiceError(e)),
+                }
+            },
+            Err(e) => Err(WalletError::OutputManagerError(e)),
+        }
     }
 }

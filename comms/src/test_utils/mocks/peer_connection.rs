@@ -28,9 +28,10 @@ use crate::{
         PeerConnectionError,
         PeerConnectionRequest,
     },
+    multiaddr::Multiaddr,
     multiplexing,
-    multiplexing::{IncomingSubstreams, Yamux},
-    peer_manager::NodeId,
+    multiplexing::{IncomingSubstreams, Substream, SubstreamCounter, Yamux},
+    peer_manager::{NodeId, Peer, PeerFeatures},
     test_utils::transport,
 };
 use futures::{channel::mpsc, lock::Mutex, stream::Fuse, StreamExt};
@@ -40,10 +41,26 @@ use std::sync::{
 };
 use tokio::runtime::Handle;
 
+pub fn create_dummy_peer_connection(node_id: NodeId) -> (PeerConnection, mpsc::Receiver<PeerConnectionRequest>) {
+    let (tx, rx) = mpsc::channel(0);
+    (
+        PeerConnection::new(
+            1,
+            tx,
+            node_id,
+            PeerFeatures::COMMUNICATION_NODE,
+            Multiaddr::empty(),
+            ConnectionDirection::Inbound,
+            SubstreamCounter::new(),
+        ),
+        rx,
+    )
+}
+
 pub async fn create_peer_connection_mock_pair(
     buf_size: usize,
-    node_id_in: NodeId,
-    node_id_out: NodeId,
+    peer_in: Peer,
+    peer_out: Peer,
 ) -> (
     PeerConnection,
     PeerConnectionMockState,
@@ -65,9 +82,25 @@ pub async fn create_peer_connection_mock_pair(
     rt_handle.spawn(mock.run());
 
     (
-        PeerConnection::new(1, tx1, node_id_in, listen_addr.clone(), ConnectionDirection::Inbound),
+        PeerConnection::new(
+            1,
+            tx1,
+            peer_in.node_id,
+            peer_in.features,
+            listen_addr.clone(),
+            ConnectionDirection::Inbound,
+            mock_state_in.substream_counter(),
+        ),
         mock_state_in,
-        PeerConnection::new(2, tx2, node_id_out, listen_addr, ConnectionDirection::Outbound),
+        PeerConnection::new(
+            2,
+            tx2,
+            peer_out.node_id,
+            peer_out.features,
+            listen_addr,
+            ConnectionDirection::Outbound,
+            mock_state_out.substream_counter(),
+        ),
         mock_state_out,
     )
 }
@@ -77,14 +110,18 @@ pub struct PeerConnectionMockState {
     call_count: Arc<AtomicUsize>,
     mux_control: Arc<Mutex<multiplexing::Control>>,
     mux_incoming: Arc<Mutex<IncomingSubstreams>>,
+    substream_counter: SubstreamCounter,
 }
 
 impl PeerConnectionMockState {
     pub fn new(muxer: Yamux) -> Self {
+        let control = muxer.get_yamux_control();
+        let substream_counter = control.substream_counter();
         Self {
             call_count: Arc::new(AtomicUsize::new(0)),
-            mux_control: Arc::new(Mutex::new(muxer.get_yamux_control())),
+            mux_control: Arc::new(Mutex::new(control)),
             mux_incoming: Arc::new(Mutex::new(muxer.incoming())),
+            substream_counter,
         }
     }
 
@@ -96,11 +133,15 @@ impl PeerConnectionMockState {
         self.call_count.load(Ordering::SeqCst)
     }
 
-    pub async fn open_substream(&self) -> Result<yamux::Stream, PeerConnectionError> {
+    pub async fn open_substream(&self) -> Result<Substream, PeerConnectionError> {
         self.mux_control.lock().await.open_stream().await.map_err(Into::into)
     }
 
-    pub async fn next_incoming_substream(&self) -> Option<yamux::Stream> {
+    pub fn substream_counter(&self) -> SubstreamCounter {
+        self.substream_counter.clone()
+    }
+
+    pub async fn next_incoming_substream(&self) -> Option<Substream> {
         self.mux_incoming.lock().await.next().await
     }
 

@@ -21,9 +21,8 @@
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 //
 
-use crate::consts;
-use structopt::StructOpt;
-use tari_common::ConfigBootstrap;
+// Import the auto-generated const values from the Manifest and Git
+include!(concat!(env!("OUT_DIR"), "/consts.rs"));
 
 /// returns the top or bottom box line of the specified length
 fn box_line(length: usize, is_top: bool) -> String {
@@ -157,12 +156,9 @@ pub fn print_banner(commands: Vec<String>, chunk_size: i32) {
     println!("{}", box_data("~~~~~~~~~~~~~~".to_string(), target_line_length));
     println!(
         "{}",
-        box_data(format!("Copyright 2019-2020. {}", consts::AUTHOR), target_line_length)
+        box_data(format!("Copyright 2019-2020. {}", AUTHOR), target_line_length)
     );
-    println!(
-        "{}",
-        box_data(format!("Version {}", consts::VERSION), target_line_length)
-    );
+    println!("{}", box_data(format!("Version {}", VERSION), target_line_length));
     println!("{}", box_separator(target_line_length));
     println!("{}", box_data("Commands".to_string(), target_line_length));
     println!("{}", box_data("~~~~~~~~".to_string(), target_line_length));
@@ -172,14 +168,4 @@ pub fn print_banner(commands: Vec<String>, chunk_size: i32) {
         println!("{}", row);
     }
     println!("{}", box_line(target_line_length, false));
-}
-
-/// The reference Tari cryptocurrency base node implementation
-#[derive(StructOpt)]
-pub struct Arguments {
-    /// Create and save new node identity if one doesn't exist
-    #[structopt(long)]
-    pub create_id: bool,
-    #[structopt(flatten)]
-    pub bootstrap: ConfigBootstrap,
 }

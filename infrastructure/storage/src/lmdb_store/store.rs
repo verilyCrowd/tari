@@ -133,10 +133,37 @@ impl LMDBBuilder {
             builder.open(&path, flags, 0o600)?
         };
         let env = Arc::new(env);
+
+        // Increase map size if usage gets close to the db size
+        let mut env_info = env.info()?;
+        let env_stat = env.stat()?;
+        let size_used = env_stat.psize as usize * env_info.last_pgno;
+        let mut space_remaining = env_info.mapsize - size_used;
+        let usage = (size_used as f64 / env_info.mapsize as f64) * 100.0;
+        if space_remaining <= ((self.db_size_mb * 1024 * 1024) as f64 * 0.5) as usize {
+            unsafe {
+                env.set_mapsize(size_used + self.db_size_mb * 1024 * 1024)?;
+            }
+            env_info = env.info()?;
+            space_remaining = env_info.mapsize - size_used;
+            debug!(
+                target: LOG_TARGET,
+                "({}) LMDB environment usage factor {:.*} %., size used {:?} MB, increased by {:?} MB.",
+                path,
+                2,
+                usage,
+                size_used / (1024 * 1024),
+                self.db_size_mb
+            );
+        };
         info!(
             target: LOG_TARGET,
-            "({}) LMDB environment created with a capacity of {} MB.", path, self.db_size_mb
+            "({}) LMDB environment created with a capacity of {} MB, {} MB remaining.",
+            path,
+            env_info.mapsize / (1024 * 1024),
+            space_remaining / (1024 * 1024)
         );
+
         let mut databases: HashMap<String, LMDBDatabase> = HashMap::new();
         if self.db_names.is_empty() {
             self = self.add_database("default", db::CREATE);
@@ -270,9 +297,9 @@ pub struct LMDBStore {
 /// However, in that case `shutdown` returns an error.
 impl LMDBStore {
     pub fn flush(&self) -> Result<(), lmdb_zero::error::Error> {
-        debug!(target: LOG_TARGET, "Forcing flush of buffers to disk");
+        trace!(target: LOG_TARGET, "Forcing flush of buffers to disk");
         self.env.sync(true)?;
-        debug!(target: LOG_TARGET, "Buffers have been flushed");
+        debug!(target: LOG_TARGET, "LMDB Buffers have been flushed");
         Ok(())
     }
 
@@ -286,7 +313,7 @@ impl LMDBStore {
             ),
             Ok(info) => {
                 let size_mb = info.mapsize / 1024 / 1024;
-                info!(
+                debug!(
                     target: LOG_TARGET,
                     "LMDB Environment information ({}). Map Size={} MB. Last page no={}. Last tx id={}",
                     self.path,
@@ -305,7 +332,7 @@ impl LMDBStore {
             ),
             Ok(stats) => {
                 let page_size = stats.psize / 1024;
-                info!(
+                debug!(
                     target: LOG_TARGET,
                     "LMDB Environment statistics ({}). Page size={}kB. Tree depth={}. Branch pages={}. Leaf Pages={}, \
                      Overflow pages={}, Entries={}",
@@ -353,7 +380,7 @@ impl LMDBDatabase {
         let tx = WriteTransaction::new(env)?;
         {
             let mut accessor = tx.access();
-            let buf = LMDBWriteTransaction::convert_value(value, 512)?;
+            let buf = LMDBWriteTransaction::convert_value(value)?;
             accessor.put(&*self.db, key, &buf, put::Flags::empty())?;
         }
         tx.commit().map_err(LMDBError::from)
@@ -392,7 +419,7 @@ impl LMDBDatabase {
             ),
             Ok(stats) => {
                 let page_size = stats.psize / 1024;
-                info!(
+                debug!(
                     target: LOG_TARGET,
                     "LMDB Database statistics ({}). Page size={}kB. Tree depth={}. Branch pages={}. Leaf Pages={}, \
                      Overflow pages={}, Entries={}",
@@ -586,7 +613,7 @@ impl<'txn, 'db: 'txn> LMDBWriteTransaction<'txn, 'db> {
         K: AsLmdbBytes + ?Sized,
         V: serde::Serialize,
     {
-        let buf = LMDBWriteTransaction::convert_value(value, 512)?;
+        let buf = Self::convert_value(value)?;
         self.access.put(&self.db, key, &buf, put::Flags::empty())?;
         Ok(())
     }
@@ -604,9 +631,10 @@ impl<'txn, 'db: 'txn> LMDBWriteTransaction<'txn, 'db> {
         Ok(self.access.del_key(&self.db, key)?)
     }
 
-    fn convert_value<V>(value: &V, size_estimate: usize) -> Result<Vec<u8>, LMDBError>
+    fn convert_value<V>(value: &V) -> Result<Vec<u8>, LMDBError>
     where V: serde::Serialize {
-        let mut buf = Vec::with_capacity(size_estimate);
+        let size = bincode::serialized_size(value).map_err(|e| LMDBError::SerializationErr(e.to_string()))?;
+        let mut buf = Vec::with_capacity(size as usize);
         bincode::serialize_into(&mut buf, value).map_err(|e| LMDBError::SerializationErr(e.to_string()))?;
         Ok(buf)
     }

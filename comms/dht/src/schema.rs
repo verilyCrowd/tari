@@ -1,5 +1,5 @@
 table! {
-    dht_settings (id) {
+    dht_metadata (id) {
         id -> Integer,
         key -> Text,
         value -> Binary,
@@ -19,7 +19,8 @@ table! {
         is_encrypted -> Bool,
         priority -> Integer,
         stored_at -> Timestamp,
+        body_hash -> Text,
     }
 }
 
-allow_tables_to_appear_in_same_query!(dht_settings, stored_messages,);
+allow_tables_to_appear_in_same_query!(dht_metadata, stored_messages,);

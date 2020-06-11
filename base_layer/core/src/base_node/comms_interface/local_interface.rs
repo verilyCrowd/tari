@@ -21,45 +21,55 @@
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 use crate::{
-    base_node::comms_interface::{error::CommsInterfaceError, BlockEvent, NodeCommsRequest, NodeCommsResponse},
+    base_node::comms_interface::{
+        error::CommsInterfaceError,
+        BlockEvent,
+        Broadcast,
+        NodeCommsRequest,
+        NodeCommsResponse,
+    },
     blocks::{Block, BlockHeader, NewBlockTemplate},
     chain_storage::{ChainMetadata, HistoricalBlock},
     proof_of_work::{Difficulty, PowAlgorithm},
 };
 use futures::{stream::Fuse, StreamExt};
-use tari_broadcast_channel::Subscriber;
+use std::sync::Arc;
 use tari_service_framework::reply_channel::SenderService;
+use tokio::sync::broadcast;
 use tower_service::Service;
+
+pub type BlockEventSender = broadcast::Sender<Arc<BlockEvent>>;
+pub type BlockEventReceiver = broadcast::Receiver<Arc<BlockEvent>>;
 
 /// The InboundNodeCommsInterface provides an interface to request information from the current local node by other
 /// internal services.
 #[derive(Clone)]
 pub struct LocalNodeCommsInterface {
     request_sender: SenderService<NodeCommsRequest, Result<NodeCommsResponse, CommsInterfaceError>>,
-    block_sender: SenderService<Block, Result<(), CommsInterfaceError>>,
-    block_event_stream: Subscriber<BlockEvent>,
+    block_sender: SenderService<(Block, Broadcast), Result<(), CommsInterfaceError>>,
+    block_event_sender: BlockEventSender,
 }
 
 impl LocalNodeCommsInterface {
     /// Construct a new LocalNodeCommsInterface with the specified SenderService.
     pub fn new(
         request_sender: SenderService<NodeCommsRequest, Result<NodeCommsResponse, CommsInterfaceError>>,
-        block_sender: SenderService<Block, Result<(), CommsInterfaceError>>,
-        block_event_stream: Subscriber<BlockEvent>,
+        block_sender: SenderService<(Block, Broadcast), Result<(), CommsInterfaceError>>,
+        block_event_sender: BlockEventSender,
     ) -> Self
     {
         Self {
             request_sender,
             block_sender,
-            block_event_stream,
+            block_event_sender,
         }
     }
 
-    pub fn get_block_event_stream(&self) -> Subscriber<BlockEvent> {
-        self.block_event_stream.clone()
+    pub fn get_block_event_stream(&self) -> BlockEventReceiver {
+        self.block_event_sender.subscribe()
     }
 
-    pub fn get_block_event_stream_fused(&self) -> Fuse<Subscriber<BlockEvent>> {
+    pub fn get_block_event_stream_fused(&self) -> Fuse<BlockEventReceiver> {
         self.get_block_event_stream().fuse()
     }
 
@@ -96,10 +106,14 @@ impl LocalNodeCommsInterface {
     }
 
     /// Request the construction of a new mineable block template from the base node service.
-    pub async fn get_new_block_template(&mut self) -> Result<NewBlockTemplate, CommsInterfaceError> {
+    pub async fn get_new_block_template(
+        &mut self,
+        pow_algorithm: PowAlgorithm,
+    ) -> Result<NewBlockTemplate, CommsInterfaceError>
+    {
         match self
             .request_sender
-            .call(NodeCommsRequest::GetNewBlockTemplate)
+            .call(NodeCommsRequest::GetNewBlockTemplate(pow_algorithm))
             .await??
         {
             NodeCommsResponse::NewBlockTemplate(new_block_template) => Ok(new_block_template),
@@ -135,8 +149,8 @@ impl LocalNodeCommsInterface {
         }
     }
 
-    /// Submit a block to the base node service.
-    pub async fn submit_block(&mut self, block: Block) -> Result<(), CommsInterfaceError> {
-        self.block_sender.call(block).await?
+    /// Submit a block to the base node service. Internal_only flag will prevent propagation.
+    pub async fn submit_block(&mut self, block: Block, propagate: Broadcast) -> Result<(), CommsInterfaceError> {
+        self.block_sender.call((block, propagate)).await?
     }
 }

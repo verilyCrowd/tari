@@ -142,7 +142,7 @@ use tari_comms::{
     socks,
     tor,
 };
-use tari_comms_dht::DhtConfig;
+use tari_comms_dht::{DbConnectionUrl, DhtConfig};
 use tari_core::transactions::{tari_amount::MicroTari, types::CryptoFactories};
 use tari_crypto::{
     keys::{PublicKey, SecretKey},
@@ -164,9 +164,19 @@ use tari_wallet::{
         mine_transaction,
         receive_test_transaction,
     },
-    transaction_service::storage::{
-        database::{InboundTransaction, OutboundTransaction, TransactionDatabase, TransactionStatus},
-        sqlite_db::TransactionServiceSqliteDatabase,
+    transaction_service::{
+        config::TransactionServiceConfig,
+        error::TransactionServiceError,
+        storage::{
+            database::{
+                CompletedTransaction,
+                InboundTransaction,
+                OutboundTransaction,
+                TransactionDatabase,
+                TransactionStatus,
+            },
+            sqlite_db::TransactionServiceSqliteDatabase,
+        },
     },
     util::emoji::EmojiId,
     wallet::WalletConfig,
@@ -203,6 +213,8 @@ pub struct TariPendingOutboundTransactions(Vec<TariPendingOutboundTransaction>);
 
 #[derive(Debug, PartialEq)]
 pub struct ByteVector(Vec<c_uchar>); // declared like this so that it can be exposed to external header
+
+pub struct TariSeedWords(Vec<String>);
 
 /// -------------------------------- Strings ------------------------------------------------ ///
 
@@ -697,6 +709,89 @@ pub unsafe extern "C" fn private_key_from_hex(key: *const c_char, error_out: *mu
 }
 
 /// -------------------------------------------------------------------------------------------- ///
+/// ----------------------------------- Seed Words ----------------------------------------------///
+
+/// Gets the length of TariSeedWords
+///
+/// ## Arguments
+/// `seed_words` - The pointer to a TariSeedWords
+/// `error_out` - Pointer to an int which will be modified to an error code should one occur, may not be null. Functions
+/// as an out parameter.
+///
+/// ## Returns
+/// `c_uint` - Returns number of elements in , zero if contacts is null
+///
+/// # Safety
+/// None
+#[no_mangle]
+pub unsafe extern "C" fn seed_words_get_length(seed_words: *const TariSeedWords, error_out: *mut c_int) -> c_uint {
+    let mut error = 0;
+    ptr::swap(error_out, &mut error as *mut c_int);
+    let mut len = 0;
+    if seed_words.is_null() {
+        error = LibWalletError::from(InterfaceError::NullError("seed words".to_string())).code;
+        ptr::swap(error_out, &mut error as *mut c_int);
+    } else {
+        len = (*seed_words).0.len();
+    }
+    len as c_uint
+}
+
+/// Gets a seed word from TariSeedWords at position
+///
+/// ## Arguments
+/// `seed_words` - The pointer to a TariSeedWords
+/// `position` - The integer position
+/// `error_out` - Pointer to an int which will be modified to an error code should one occur, may not be null. Functions
+/// as an out parameter.
+///
+/// ## Returns
+/// `*mut c_char` - Returns a pointer to a char array. Note that it returns an empty char array if
+/// TariSeedWords collection is null or the position is invalid
+///
+/// # Safety
+/// The ```string_destroy``` method must be called when finished with a string from rust to prevent a memory leak
+#[no_mangle]
+pub unsafe extern "C" fn seed_words_get_at(
+    seed_words: *mut TariSeedWords,
+    position: c_uint,
+    error_out: *mut c_int,
+) -> *mut c_char
+{
+    let mut error = 0;
+    ptr::swap(error_out, &mut error as *mut c_int);
+    let mut word = CString::new("").unwrap();
+    if seed_words.is_null() {
+        error = LibWalletError::from(InterfaceError::NullError("seed words".to_string())).code;
+        ptr::swap(error_out, &mut error as *mut c_int);
+    } else {
+        let len = (*seed_words).0.len();
+        if position > len as u32 {
+            error = LibWalletError::from(InterfaceError::PositionInvalidError).code;
+            ptr::swap(error_out, &mut error as *mut c_int);
+        } else {
+            word = CString::new((*seed_words).0[position as usize].clone()).unwrap()
+        }
+    }
+    CString::into_raw(word)
+}
+
+/// Frees memory for a TariSeedWords
+///
+/// ## Arguments
+/// `seed_words` - The pointer to a TariSeedWords
+///
+/// ## Returns
+/// `()` - Does not return a value, equivalent to void in C
+///
+/// # Safety
+/// None
+#[no_mangle]
+pub unsafe extern "C" fn seed_words_destroy(seed_words: *mut TariSeedWords) {
+    if !seed_words.is_null() {
+        Box::from_raw(seed_words);
+    }
+}
 
 /// ----------------------------------- Contact -------------------------------------------------///
 
@@ -2183,7 +2278,9 @@ pub unsafe extern "C" fn comms_config_create(
         ptr::swap(error_out, &mut error as *mut c_int);
         return ptr::null_mut();
     }
+    let datastore_path = PathBuf::from(datastore_path_string);
 
+    let dht_database_path = datastore_path.join("dht.db");
     let public_address = public_address_str.parse::<Multiaddr>();
 
     match public_address {
@@ -2198,12 +2295,13 @@ pub unsafe extern "C" fn comms_config_create(
                     let config = TariCommsConfig {
                         node_identity: Arc::new(ni),
                         transport_type: (*transport_type).clone(),
-                        datastore_path: PathBuf::from(datastore_path_string),
+                        datastore_path,
                         peer_database_name: database_name_string,
                         max_concurrent_inbound_tasks: 100,
                         outbound_buffer_size: 100,
                         dht: DhtConfig {
                             discovery_request_timeout: Duration::from_secs(discovery_timeout_in_secs),
+                            database_url: DbConnectionUrl::File(dht_database_path),
                             ..Default::default()
                         },
                         // TODO: This should be set to false for non-test wallets. See the `allow_test_addresses` field
@@ -2293,7 +2391,7 @@ pub unsafe extern "C" fn wallet_create(
     callback_transaction_mined: unsafe extern "C" fn(*mut TariCompletedTransaction),
     callback_direct_send_result: unsafe extern "C" fn(c_ulonglong, bool),
     callback_store_and_forward_send_result: unsafe extern "C" fn(c_ulonglong, bool),
-    callback_transaction_cancellation: unsafe extern "C" fn(c_ulonglong),
+    callback_transaction_cancellation: unsafe extern "C" fn(*mut TariCompletedTransaction),
     callback_base_node_sync_complete: unsafe extern "C" fn(u64, bool),
     error_out: *mut c_int,
 ) -> *mut TariWallet
@@ -2321,8 +2419,10 @@ pub unsafe extern "C" fn wallet_create(
             .build(Root::builder().appender("logfile").build(LevelFilter::Debug))
             .unwrap();
 
-        log4rs::init_config(lconfig).expect("Should be able to start logging");
-        debug!(target: LOG_TARGET, "Logging started");
+        match log4rs::init_config(lconfig) {
+            Ok(_) => debug!(target: LOG_TARGET, "Logging started"),
+            Err(_) => warn!(target: LOG_TARGET, "Logging has already been initialized"),
+        }
     }
 
     let runtime = Runtime::new();
@@ -2354,7 +2454,10 @@ pub unsafe extern "C" fn wallet_create(
                 WalletConfig {
                     comms_config: (*config).clone(),
                     factories,
-                    transaction_service_config: None,
+                    transaction_service_config: Some(TransactionServiceConfig {
+                        direct_send_timeout: (*config).dht.discovery_request_timeout.clone(),
+                        ..Default::default()
+                    }),
                 },
                 runtime,
                 wallet_backend,
@@ -2371,6 +2474,7 @@ pub unsafe extern "C" fn wallet_create(
                         w.transaction_service.get_event_stream_fused(),
                         w.output_manager_service.get_event_stream_fused(),
                         w.comms.shutdown_signal(),
+                        w.comms.node_identity().public_key().clone(),
                         callback_received_transaction,
                         callback_received_transaction_reply,
                         callback_received_finalized_transaction,
@@ -3381,6 +3485,90 @@ pub unsafe extern "C" fn wallet_get_pending_outbound_transactions(
     }
 }
 
+/// Get the all Cancelled Transactions from a TariWallet. This function will also get cancelled pending inbound and
+/// outbound transaction and include them in this list by converting them to CompletedTransactions
+///
+/// ## Arguments
+/// `wallet` - The TariWallet pointer
+/// `error_out` - Pointer to an int which will be modified to an error code should one occur, may not be null. Functions
+/// as an out parameter.
+///
+/// ## Returns
+/// `*mut TariCompletedTransactions` - returns the transactions, note that it returns ptr::null_mut() if
+/// wallet is null or an error is encountered
+///
+/// # Safety
+/// The ```completed_transactions_destroy``` method must be called when finished with a TariCompletedTransactions to
+/// prevent a memory leak
+#[no_mangle]
+pub unsafe extern "C" fn wallet_get_cancelled_transactions(
+    wallet: *mut TariWallet,
+    error_out: *mut c_int,
+) -> *mut TariCompletedTransactions
+{
+    let mut error = 0;
+    ptr::swap(error_out, &mut error as *mut c_int);
+
+    if wallet.is_null() {
+        error = LibWalletError::from(InterfaceError::NullError("wallet".to_string())).code;
+        ptr::swap(error_out, &mut error as *mut c_int);
+        return ptr::null_mut();
+    }
+
+    let completed_transactions = match (*wallet)
+        .runtime
+        .block_on((*wallet).transaction_service.get_cancelled_completed_transactions())
+    {
+        Ok(txs) => txs,
+        Err(e) => {
+            error = LibWalletError::from(WalletError::TransactionServiceError(e)).code;
+            ptr::swap(error_out, &mut error as *mut c_int);
+            return ptr::null_mut();
+        },
+    };
+    let inbound_transactions = match (*wallet).runtime.block_on(
+        (*wallet)
+            .transaction_service
+            .get_cancelled_pending_inbound_transactions(),
+    ) {
+        Ok(txs) => txs,
+        Err(e) => {
+            error = LibWalletError::from(WalletError::TransactionServiceError(e)).code;
+            ptr::swap(error_out, &mut error as *mut c_int);
+            return ptr::null_mut();
+        },
+    };
+    let outbound_transactions = match (*wallet).runtime.block_on(
+        (*wallet)
+            .transaction_service
+            .get_cancelled_pending_outbound_transactions(),
+    ) {
+        Ok(txs) => txs,
+        Err(e) => {
+            error = LibWalletError::from(WalletError::TransactionServiceError(e)).code;
+            ptr::swap(error_out, &mut error as *mut c_int);
+            return ptr::null_mut();
+        },
+    };
+
+    let mut completed = Vec::new();
+    for tx in completed_transactions.values() {
+        completed.push(tx.clone());
+    }
+    for tx in inbound_transactions.values() {
+        let mut inbound_tx = CompletedTransaction::from(tx.clone());
+        inbound_tx.destination_public_key = (*wallet).comms.node_identity().public_key().clone();
+        completed.push(inbound_tx);
+    }
+    for tx in outbound_transactions.values() {
+        let mut outbound_tx = CompletedTransaction::from(tx.clone());
+        outbound_tx.source_public_key = (*wallet).comms.node_identity().public_key().clone();
+        completed.push(outbound_tx);
+    }
+
+    Box::into_raw(Box::new(TariCompletedTransactions(completed)))
+}
+
 /// Get the TariCompletedTransaction from a TariWallet by its' TransactionId
 ///
 /// ## Arguments
@@ -3579,6 +3767,108 @@ pub unsafe extern "C" fn wallet_get_pending_outbound_transaction_by_id(
     ptr::null_mut()
 }
 
+/// Get a Cancelled transaction from a TariWallet by its TransactionId. Pending Inbound or Outbound transaction will be
+/// converted to a CompletedTransaction
+///
+/// ## Arguments
+/// `wallet` - The TariWallet pointer
+/// `transaction_id` - The TransactionId
+/// `error_out` - Pointer to an int which will be modified to an error code should one occur, may not be null. Functions
+/// as an out parameter.
+///
+/// ## Returns
+/// `*mut TariCompletedTransaction` - returns the transaction, note that it returns ptr::null_mut() if
+/// wallet is null, an error is encountered or if the transaction is not found
+///
+/// # Safety
+/// The ```completed_transaction_destroy``` method must be called when finished with a TariCompletedTransaction to
+/// prevent a memory leak
+#[no_mangle]
+pub unsafe extern "C" fn wallet_get_cancelled_transaction_by_id(
+    wallet: *mut TariWallet,
+    transaction_id: c_ulonglong,
+    error_out: *mut c_int,
+) -> *mut TariCompletedTransaction
+{
+    let mut error = 0;
+    ptr::swap(error_out, &mut error as *mut c_int);
+    if wallet.is_null() {
+        error = LibWalletError::from(InterfaceError::NullError("wallet".to_string())).code;
+        ptr::swap(error_out, &mut error as *mut c_int);
+        return ptr::null_mut();
+    }
+
+    let mut transaction = None;
+
+    let mut completed_transactions = match (*wallet)
+        .runtime
+        .block_on((*wallet).transaction_service.get_cancelled_completed_transactions())
+    {
+        Ok(txs) => txs,
+        Err(e) => {
+            error = LibWalletError::from(WalletError::TransactionServiceError(e)).code;
+            ptr::swap(error_out, &mut error as *mut c_int);
+            return ptr::null_mut();
+        },
+    };
+
+    if let Some(tx) = completed_transactions.remove(&transaction_id) {
+        transaction = Some(tx);
+    } else {
+        let mut outbound_transactions = match (*wallet).runtime.block_on(
+            (*wallet)
+                .transaction_service
+                .get_cancelled_pending_outbound_transactions(),
+        ) {
+            Ok(txs) => txs,
+            Err(e) => {
+                error = LibWalletError::from(WalletError::TransactionServiceError(e)).code;
+                ptr::swap(error_out, &mut error as *mut c_int);
+                return ptr::null_mut();
+            },
+        };
+
+        if let Some(tx) = outbound_transactions.remove(&transaction_id) {
+            let mut outbound_tx = CompletedTransaction::from(tx);
+            outbound_tx.source_public_key = (*wallet).comms.node_identity().public_key().clone();
+            transaction = Some(outbound_tx);
+        } else {
+            let mut inbound_transactions = match (*wallet).runtime.block_on(
+                (*wallet)
+                    .transaction_service
+                    .get_cancelled_pending_inbound_transactions(),
+            ) {
+                Ok(txs) => txs,
+                Err(e) => {
+                    error = LibWalletError::from(WalletError::TransactionServiceError(e)).code;
+                    ptr::swap(error_out, &mut error as *mut c_int);
+                    return ptr::null_mut();
+                },
+            };
+            if let Some(tx) = inbound_transactions.remove(&transaction_id) {
+                let mut inbound_tx = CompletedTransaction::from(tx);
+                inbound_tx.destination_public_key = (*wallet).comms.node_identity().public_key().clone();
+                transaction = Some(inbound_tx);
+            }
+        }
+    }
+
+    match transaction {
+        Some(tx) => {
+            return Box::into_raw(Box::new(tx));
+        },
+        None => {
+            error = LibWalletError::from(WalletError::TransactionServiceError(
+                TransactionServiceError::TransactionDoesNotExistError,
+            ))
+            .code;
+            ptr::swap(error_out, &mut error as *mut c_int);
+        },
+    }
+
+    ptr::null_mut()
+}
+
 /// Get the TariPublicKey from a TariWallet
 ///
 /// ## Arguments
@@ -3676,7 +3966,7 @@ pub unsafe extern "C" fn wallet_import_utxo(
     }
 }
 
-/// Cancel a Pending Outbound Transaction
+/// Cancel a Pending Transaction
 ///
 /// ## Arguments
 /// `wallet` - The TariWallet pointer
@@ -3718,7 +4008,8 @@ pub unsafe extern "C" fn wallet_cancel_pending_transaction(
 }
 
 /// This function will tell the wallet to query the set base node to confirm the status of wallet data. For example this
-/// will check that Unspent Outputs stored in the wallet are still available as UTXO's on the blockchain
+/// will check that Unspent Outputs stored in the wallet are still available as UTXO's on the blockchain. This will also
+/// trigger a request for outstanding SAF messages to you neighbours
 ///
 /// ## Arguments
 /// `wallet` - The TariWallet pointer
@@ -3751,6 +4042,99 @@ pub unsafe extern "C" fn wallet_sync_with_base_node(wallet: *mut TariWallet, err
     }
 }
 
+/// This function will tell the wallet to do a coin split.
+///
+/// ## Arguments
+/// `wallet` - The TariWallet pointer
+/// `amount` - The amount to split
+/// `count` - The number of times to split the amount
+/// `fee` - The transaction fee
+/// `msg` - Message for split
+/// `lock_height` - The number of bocks to lock the transaction for
+/// `error_out` - Pointer to an int which will be modified to an error code should one occur, may not be null. Functions
+/// as an out parameter.
+///
+/// ## Returns
+/// `c_ulonglong` - Returns the transaction id.
+///
+/// # Safety
+/// None
+#[no_mangle]
+pub unsafe extern "C" fn wallet_coin_split(
+    wallet: *mut TariWallet,
+    amount: c_ulonglong,
+    count: c_ulonglong,
+    fee: c_ulonglong,
+    msg: *const c_char,
+    lock_height: c_ulonglong,
+    error_out: *mut c_int,
+) -> c_ulonglong
+{
+    let mut error = 0;
+    ptr::swap(error_out, &mut error as *mut c_int);
+    if wallet.is_null() {
+        error = LibWalletError::from(InterfaceError::NullError("wallet".to_string())).code;
+        ptr::swap(error_out, &mut error as *mut c_int);
+    }
+
+    let message = if !msg.is_null() {
+        CStr::from_ptr(msg).to_str().unwrap().to_owned()
+    } else {
+        "Coin Split".to_string()
+    };
+
+    match (*wallet).coin_split(
+        MicroTari(amount),
+        count as usize,
+        MicroTari(fee),
+        message,
+        Some(lock_height),
+    ) {
+        Ok(request_key) => request_key,
+        Err(e) => {
+            error = LibWalletError::from(e).code;
+            ptr::swap(error_out, &mut error as *mut c_int);
+            0
+        },
+    }
+}
+
+/// Gets the seed words representing the seed private key of the provided `TariWallet`.
+///
+/// ## Arguments
+/// `wallet` - The TariWallet pointer
+/// `error_out` - Pointer to an int which will be modified to an error code should one occur, may not be null. Functions
+/// as an out parameter.
+///
+/// ## Returns
+/// `*mut TariSeedWords` - A collection of the seed words
+///
+/// # Safety
+/// The ```tari_seed_words_destroy``` method must be called when finished with a
+/// TariSeedWords to prevent a memory leak
+#[no_mangle]
+pub unsafe extern "C" fn wallet_get_seed_words(wallet: *mut TariWallet, error_out: *mut c_int) -> *mut TariSeedWords {
+    let mut error = 0;
+    ptr::swap(error_out, &mut error as *mut c_int);
+    if wallet.is_null() {
+        error = LibWalletError::from(InterfaceError::NullError("wallet".to_string())).code;
+        ptr::swap(error_out, &mut error as *mut c_int);
+        return ptr::null_mut();
+    }
+
+    match (*wallet)
+        .runtime
+        .block_on((*wallet).output_manager_service.get_seed_words())
+    {
+        Ok(sw) => Box::into_raw(Box::new(TariSeedWords(sw.clone()))),
+        Err(e) => {
+            error = LibWalletError::from(WalletError::OutputManagerError(e)).code;
+            ptr::swap(error_out, &mut error as *mut c_int);
+            ptr::null_mut()
+        },
+    }
+}
+
 /// Frees memory for a TariWallet
 ///
 /// ## Arguments
@@ -3769,14 +4153,31 @@ pub unsafe extern "C" fn wallet_destroy(wallet: *mut TariWallet) {
     }
 }
 
+/// This function will log the provided string at debug level. To be used to have a client log messages to the LibWallet
+/// logs.
+///
+/// ## Arguments
+/// `msg` - A string that will be logged at the debug level. If msg is null nothing will be done.
+///
+/// # Safety
+/// None
+#[no_mangle]
+pub unsafe extern "C" fn log_debug_message(msg: *const c_char) {
+    if !msg.is_null() {
+        let message = CStr::from_ptr(msg).to_str().unwrap().to_owned();
+        debug!(target: LOG_TARGET, "{}", message);
+    }
+}
+
 #[cfg(test)]
 mod test {
     extern crate libc;
 
     use crate::*;
     use libc::{c_char, c_uchar, c_uint};
-    use std::{ffi::CString, sync::Mutex};
-    use tari_core::transactions::tari_amount::uT;
+    use std::{ffi::CString, sync::Mutex, thread};
+    use tari_core::transactions::{tari_amount::uT, types::PrivateKey};
+    use tari_key_manager::mnemonic::Mnemonic;
     use tari_wallet::{testnet_utils::random_string, transaction_service::storage::database::TransactionStatus};
     use tempdir::TempDir;
 
@@ -3904,8 +4305,13 @@ mod test {
         assert!(true);
     }
 
-    unsafe extern "C" fn tx_cancellation_callback(_tx_id: c_ulonglong) {
-        assert!(true);
+    unsafe extern "C" fn tx_cancellation_callback(tx: *mut TariCompletedTransaction) {
+        assert_eq!(tx.is_null(), false);
+        assert_eq!(
+            type_of((*tx).clone()),
+            std::any::type_name::<TariCompletedTransaction>()
+        );
+        completed_transaction_destroy(tx);
     }
 
     unsafe extern "C" fn base_node_sync_process_complete_callback(_tx_id: c_ulonglong, _result: bool) {
@@ -3969,8 +4375,13 @@ mod test {
         assert!(true);
     }
 
-    unsafe extern "C" fn tx_cancellation_callback_bob(_tx_id: c_ulonglong) {
-        assert!(true);
+    unsafe extern "C" fn tx_cancellation_callback_bob(tx: *mut TariCompletedTransaction) {
+        assert_eq!(tx.is_null(), false);
+        assert_eq!(
+            type_of((*tx).clone()),
+            std::any::type_name::<TariCompletedTransaction>()
+        );
+        completed_transaction_destroy(tx);
     }
 
     unsafe extern "C" fn base_node_sync_process_complete_callback_bob(_tx_id: c_ulonglong, _result: bool) {
@@ -4536,6 +4947,89 @@ mod test {
                 .unwrap();
             assert!(wallet_sync_with_base_node(alice_wallet, error_ptr) > 0);
 
+            // Test pending tx cancellation
+            let ffi_cancelled_txs = wallet_get_cancelled_transactions(&mut (*alice_wallet), error_ptr);
+            assert_eq!(
+                completed_transactions_get_length(ffi_cancelled_txs, error_ptr),
+                0,
+                "Should have no cancelled txs"
+            );
+
+            wallet_test_receive_transaction(&mut (*alice_wallet), error_ptr);
+
+            let inbound_txs = (*alice_wallet)
+                .runtime
+                .block_on((*alice_wallet).transaction_service.get_pending_inbound_transactions())
+                .unwrap();
+
+            let mut inbound_tx_id = 0;
+            for (k, _) in inbound_txs {
+                inbound_tx_id = k;
+
+                let inbound_tx = wallet_get_cancelled_transaction_by_id(&mut (*alice_wallet), inbound_tx_id, error_ptr);
+
+                assert_eq!(inbound_tx, ptr::null_mut());
+
+                (*alice_wallet)
+                    .runtime
+                    .block_on(async { (*alice_wallet).transaction_service.cancel_transaction(k).await })
+                    .unwrap();
+
+                let inbound_tx = wallet_get_cancelled_transaction_by_id(&mut (*alice_wallet), inbound_tx_id, error_ptr);
+
+                assert_ne!(inbound_tx, ptr::null_mut());
+                assert_eq!(completed_transaction_get_transaction_id(inbound_tx, error_ptr), k);
+
+                break;
+            }
+
+            let mut found_cancelled_tx = false;
+            let mut ffi_cancelled_txs = ptr::null_mut();
+            for _ in 0..12 {
+                ffi_cancelled_txs = wallet_get_cancelled_transactions(&mut (*alice_wallet), error_ptr);
+                if completed_transactions_get_length(ffi_cancelled_txs, error_ptr) >= 1 {
+                    found_cancelled_tx = true;
+                    break;
+                }
+                thread::sleep(Duration::from_secs(5));
+            }
+            assert!(found_cancelled_tx, "Should have found a cancelled tx");
+
+            let cancelled_tx = completed_transactions_get_at(ffi_cancelled_txs, 0, error_ptr);
+            let tx_id = completed_transaction_get_transaction_id(cancelled_tx, error_ptr);
+            let dest_pubkey = completed_transaction_get_destination_public_key(cancelled_tx, error_ptr);
+            let pub_key_ptr = Box::into_raw(Box::new((*alice_wallet).comms.node_identity().public_key().clone()));
+            assert_eq!(tx_id, inbound_tx_id);
+            assert_eq!(*dest_pubkey, *pub_key_ptr);
+            public_key_destroy(pub_key_ptr);
+
+            completed_transaction_destroy(cancelled_tx);
+
+            let split_msg = CString::new("Test Coin Split").unwrap();
+            let split_msg_str: *const c_char = CString::into_raw(split_msg) as *const c_char;
+            let split_tx_id = wallet_coin_split(alice_wallet, 1000, 3, 100, split_msg_str, 0, error_ptr);
+            assert_eq!(error, 0);
+            let split_tx = (*alice_wallet).runtime.block_on(
+                (*alice_wallet)
+                    .transaction_service
+                    .get_completed_transaction(split_tx_id),
+            );
+            assert_eq!(split_tx.is_ok(), true);
+            string_destroy(split_msg_str as *mut c_char);
+
+            // Test seed words
+            let seed_words = wallet_get_seed_words(alice_wallet, error_ptr);
+            let seed_word_len = seed_words_get_length(seed_words, error_ptr);
+
+            let mut seed_words_vec = Vec::new();
+            for i in 0..seed_word_len {
+                let word = seed_words_get_at(seed_words, i as c_uint, error_ptr);
+                let word_string = CString::from_raw(word).to_str().unwrap().to_owned();
+                seed_words_vec.push(word_string);
+            }
+            let _seed_word_private_key = PrivateKey::from_mnemonic(&seed_words_vec)
+                .expect("Seed words should be able to convert to private key");
+
             let lock = CALLBACK_STATE_FFI.lock().unwrap();
             assert!(lock.received_tx_callback_called);
             assert!(lock.received_tx_reply_callback_called);
@@ -4566,6 +5060,7 @@ mod test {
             comms_config_destroy(alice_config);
             transport_type_destroy(transport_type_alice);
             transport_type_destroy(transport_type_bob);
+            seed_words_destroy(seed_words);
         }
     }
 }

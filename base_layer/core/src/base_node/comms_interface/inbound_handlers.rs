@@ -22,7 +22,12 @@
 
 use crate::{
     base_node::{
-        comms_interface::{error::CommsInterfaceError, NodeCommsRequest, NodeCommsResponse},
+        comms_interface::{
+            error::CommsInterfaceError,
+            local_interface::BlockEventSender,
+            NodeCommsRequest,
+            NodeCommsResponse,
+        },
         OutboundNodeCommsInterface,
     },
     blocks::{blockheader::BlockHeader, Block, NewBlockTemplate},
@@ -36,32 +41,58 @@ use crate::{
     },
     consensus::ConsensusManager,
     mempool::{async_mempool, Mempool},
+    proof_of_work::{get_target_difficulty, Difficulty, PowAlgorithm},
     transactions::transaction::{TransactionKernel, TransactionOutput},
 };
-use futures::SinkExt;
+use croaring::Bitmap;
 use log::*;
-use std::sync::Arc;
+use std::{
+    fmt::{Display, Error, Formatter},
+    sync::Arc,
+};
 use strum_macros::Display;
-use tari_broadcast_channel::Publisher;
-use tari_comms::types::CommsPublicKey;
+use tari_comms::peer_manager::NodeId;
 use tari_crypto::tari_utilities::{hash::Hashable, hex::Hex};
-use tokio::sync::RwLock;
 
 const LOG_TARGET: &str = "c::bn::comms_interface::inbound_handler";
 const MAX_HEADERS_PER_RESPONSE: u32 = 100;
 
 /// Events that can be published on the Validated Block Event Stream
+/// Broadcast is to notify subscribers if this is a valid propagated block event
 #[derive(Debug, Clone, Display)]
 pub enum BlockEvent {
-    Verified((Box<Block>, BlockAddResult)),
-    Invalid((Box<Block>, ChainStorageError)),
+    Verified((Box<Block>, BlockAddResult, Broadcast)),
+    Invalid((Box<Block>, ChainStorageError, Broadcast)),
+}
+
+/// Used to notify if the block event is for a propagated block.
+#[derive(Debug, Clone, Copy)]
+pub struct Broadcast(bool);
+
+#[allow(clippy::identity_op)]
+impl Display for Broadcast {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
+        write!(f, "Broadcast[{}]", self.0)
+    }
+}
+
+impl From<Broadcast> for bool {
+    fn from(v: Broadcast) -> Self {
+        v.0
+    }
+}
+
+impl From<bool> for Broadcast {
+    fn from(v: bool) -> Self {
+        Broadcast(v)
+    }
 }
 
 /// The InboundNodeCommsInterface is used to handle all received inbound requests from remote nodes.
 pub struct InboundNodeCommsHandlers<T>
 where T: BlockchainBackend + 'static
 {
-    event_publisher: Arc<RwLock<Publisher<BlockEvent>>>,
+    block_event_sender: BlockEventSender,
     blockchain_db: BlockchainDatabase<T>,
     mempool: Mempool<T>,
     consensus_manager: ConsensusManager,
@@ -73,7 +104,7 @@ where T: BlockchainBackend + 'static
 {
     /// Construct a new InboundNodeCommsInterface.
     pub fn new(
-        event_publisher: Publisher<BlockEvent>,
+        block_event_sender: BlockEventSender,
         blockchain_db: BlockchainDatabase<T>,
         mempool: Mempool<T>,
         consensus_manager: ConsensusManager,
@@ -81,7 +112,7 @@ where T: BlockchainBackend + 'static
     ) -> Self
     {
         Self {
-            event_publisher: Arc::new(RwLock::new(event_publisher)),
+            block_event_sender,
             blockchain_db,
             mempool,
             consensus_manager,
@@ -167,7 +198,9 @@ where T: BlockchainBackend + 'static
                     debug!(target: LOG_TARGET, "A peer has requested block {}", block_num);
                     match async_db::fetch_block(self.blockchain_db.clone(), *block_num).await {
                         Ok(block) => blocks.push(block),
-                        Err(e) => info!(
+                        // We need to suppress the error as another node might ask for a block we dont have, so we
+                        // return ok([])
+                        Err(e) => debug!(
                             target: LOG_TARGET,
                             "Could not provide requested block {} to peer because: {}",
                             block_num,
@@ -187,12 +220,12 @@ where T: BlockchainBackend + 'static
                     );
                     match async_db::fetch_block_with_hash(self.blockchain_db.clone(), block_hash.clone()).await {
                         Ok(Some(block)) => blocks.push(block),
-                        Ok(None) => info!(
+                        Ok(None) => warn!(
                             target: LOG_TARGET,
                             "Could not provide requested block {} to peer because not stored",
                             block_hash.to_hex(),
                         ),
-                        Err(e) => info!(
+                        Err(e) => warn!(
                             target: LOG_TARGET,
                             "Could not provide requested block {} to peer because: {}",
                             block_hash.to_hex(),
@@ -202,15 +235,18 @@ where T: BlockchainBackend + 'static
                 }
                 Ok(NodeCommsResponse::HistoricalBlocks(blocks))
             },
-            NodeCommsRequest::GetNewBlockTemplate => {
+            NodeCommsRequest::GetNewBlockTemplate(pow_algo) => {
                 let metadata = async_db::get_metadata(self.blockchain_db.clone()).await?;
                 let best_block_hash = metadata
                     .best_block
                     .ok_or_else(|| CommsInterfaceError::UnexpectedApiResponse)?;
                 let best_block_header =
                     async_db::fetch_header_with_block_hash(self.blockchain_db.clone(), best_block_hash).await?;
+
+                let constants = self.consensus_manager.consensus_constants();
                 let mut header = BlockHeader::from_previous(&best_block_header);
-                header.version = self.consensus_manager.consensus_constants().blockchain_version();
+                header.version = constants.blockchain_version();
+                header.pow.target_difficulty = self.get_target_difficulty(*pow_algo).await?;
 
                 let transactions = async_mempool::retrieve(
                     self.mempool.clone(),
@@ -226,18 +262,48 @@ where T: BlockchainBackend + 'static
 
                 let block_template =
                     NewBlockTemplate::from(header.into_builder().with_transactions(transactions).build());
-                trace!(target: LOG_TARGET, "New block template requested {}", block_template);
+                debug!(
+                    target: LOG_TARGET,
+                    "New block template requested at height {}", block_template.header.height
+                );
                 Ok(NodeCommsResponse::NewBlockTemplate(block_template))
             },
             NodeCommsRequest::GetNewBlock(block_template) => {
                 let block = async_db::calculate_mmr_roots(self.blockchain_db.clone(), block_template.clone()).await?;
                 Ok(NodeCommsResponse::NewBlock(block))
             },
-            NodeCommsRequest::GetTargetDifficulty(pow_algo) => {
-                let db = &self.blockchain_db.db_read_access()?;
-                Ok(NodeCommsResponse::TargetDifficulty(
-                    self.consensus_manager.get_target_difficulty(&**db, *pow_algo)?,
-                ))
+            NodeCommsRequest::GetTargetDifficulty(pow_algo) => Ok(NodeCommsResponse::TargetDifficulty(
+                self.get_target_difficulty(*pow_algo).await?,
+            )),
+            NodeCommsRequest::FetchMmrNodeCount(tree, height) => {
+                let node_count =
+                    async_db::fetch_mmr_node_count(self.blockchain_db.clone(), tree.clone(), *height).await?;
+                Ok(NodeCommsResponse::MmrNodeCount(node_count))
+            },
+            NodeCommsRequest::FetchMmrNodes(tree, pos, count) => {
+                let mut added = Vec::<Vec<u8>>::with_capacity(*count as usize);
+                let mut deleted = Bitmap::create();
+                match async_db::fetch_mmr_nodes(self.blockchain_db.clone(), tree.clone(), *pos, *count).await {
+                    Ok(mmr_nodes) => {
+                        for (index, (leaf_hash, deletion_status)) in mmr_nodes.into_iter().enumerate() {
+                            added.push(leaf_hash);
+                            if deletion_status {
+                                deleted.add(*pos + index as u32);
+                            }
+                        }
+                        deleted.run_optimize();
+                    },
+                    // We need to suppress the error as another node might ask for mmr nodes we dont have, so we
+                    // return ok([])
+                    Err(e) => debug!(
+                        target: LOG_TARGET,
+                        "Could not provide requested mmr nodes (pos:{},count:{}) to peer because: {}",
+                        pos,
+                        count,
+                        e.to_string()
+                    ),
+                }
+                Ok(NodeCommsResponse::MmrNodes(added, deleted.serialize()))
             },
         }
     }
@@ -245,13 +311,16 @@ where T: BlockchainBackend + 'static
     /// Handle inbound blocks from remote nodes and local services.
     pub async fn handle_block(
         &mut self,
-        block: &Block,
-        source_peer: Option<CommsPublicKey>,
+        block_context: &(Block, Broadcast),
+        source_peer: Option<NodeId>,
     ) -> Result<(), CommsInterfaceError>
     {
+        let (block, broadcast) = block_context;
         debug!(
             target: LOG_TARGET,
-            "Block received from {}",
+            "Block #{} ({}) received from {}",
+            block.header.height,
+            block.hash().to_hex(),
             source_peer
                 .as_ref()
                 .map(|p| format!("remote peer: {}", p))
@@ -260,22 +329,22 @@ where T: BlockchainBackend + 'static
         trace!(target: LOG_TARGET, "Block: {}", block);
         let add_block_result = async_db::add_block(self.blockchain_db.clone(), block.clone()).await;
         // Create block event on block event stream
+        let mut result = Ok(());
         let block_event = match add_block_result.clone() {
             Ok(block_add_result) => {
-                debug!(target: LOG_TARGET, "Block event created: {}", block_add_result);
-                BlockEvent::Verified((Box::new(block.clone()), block_add_result))
+                trace!(target: LOG_TARGET, "Block event created: {}", block_add_result);
+                BlockEvent::Verified((Box::new(block.clone()), block_add_result, *broadcast))
             },
             Err(e) => {
-                error!(target: LOG_TARGET, "Block validation failed: {:?}", e);
-                BlockEvent::Invalid((Box::new(block.clone()), e))
+                warn!(target: LOG_TARGET, "Block validation failed: {:?}", e);
+                result = Err(CommsInterfaceError::ChainStorageError(e.clone()));
+                BlockEvent::Invalid((Box::new(block.clone()), e, *broadcast))
             },
         };
-        self.event_publisher
-            .write()
-            .await
-            .send(block_event)
-            .await
+        self.block_event_sender
+            .send(Arc::new(block_event))
             .map_err(|_| CommsInterfaceError::EventStreamError)?;
+
         // Propagate verified block to remote nodes
         if let Ok(add_block_result) = add_block_result {
             let propagate = match add_block_result {
@@ -284,8 +353,8 @@ where T: BlockchainBackend + 'static
                 BlockAddResult::OrphanBlock => false,
                 BlockAddResult::ChainReorg(_) => true,
             };
-            if propagate {
-                debug!(
+            if propagate && bool::from(*broadcast) {
+                info!(
                     target: LOG_TARGET,
                     "Propagate block ({}) to network.",
                     block.hash().to_hex()
@@ -294,7 +363,35 @@ where T: BlockchainBackend + 'static
                 self.outbound_nci.propagate_block(block.clone(), exclude_peers).await?;
             }
         }
-        Ok(())
+        result
+    }
+
+    async fn get_target_difficulty(&self, pow_algo: PowAlgorithm) -> Result<Difficulty, CommsInterfaceError> {
+        let height_of_longest_chain = async_db::get_metadata(self.blockchain_db.clone())
+            .await?
+            .height_of_longest_chain
+            .ok_or_else(|| CommsInterfaceError::UnexpectedApiResponse)?;
+        trace!(
+            target: LOG_TARGET,
+            "Calculating target difficulty at height:{} for PoW:{}",
+            height_of_longest_chain,
+            pow_algo
+        );
+        let constants = self.consensus_manager.consensus_constants();
+        let target_difficulties = self.blockchain_db.fetch_target_difficulties(
+            pow_algo,
+            height_of_longest_chain,
+            constants.get_difficulty_block_window() as usize,
+        )?;
+        let target = get_target_difficulty(
+            target_difficulties,
+            constants.get_difficulty_block_window() as usize,
+            constants.get_diff_target_block_interval(),
+            constants.min_pow_difficulty(pow_algo),
+            constants.get_difficulty_max_block_interval(),
+        )?;
+        debug!(target: LOG_TARGET, "Target difficulty:{} for PoW:{}", target, pow_algo);
+        Ok(target)
     }
 }
 
@@ -304,7 +401,7 @@ where T: BlockchainBackend + 'static
     fn clone(&self) -> Self {
         // All members use Arc's internally so calling clone should be cheap.
         Self {
-            event_publisher: self.event_publisher.clone(),
+            block_event_sender: self.block_event_sender.clone(),
             blockchain_db: self.blockchain_db.clone(),
             mempool: self.mempool.clone(),
             consensus_manager: self.consensus_manager.clone(),

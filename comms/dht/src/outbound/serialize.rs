@@ -33,7 +33,7 @@ use tari_comms::{
     pipeline::PipelineError,
     Bytes,
 };
-use tari_crypto::tari_utilities::ByteArray;
+use tari_utilities::ByteArray;
 use tower::{layer::Layer, Service, ServiceExt};
 
 const LOG_TARGET: &str = "comms::dht::serialize";
@@ -64,11 +64,11 @@ where S: Service<OutboundMessage, Response = (), Error = PipelineError> + Clone 
     fn call(&mut self, message: DhtOutboundMessage) -> Self::Future {
         let next_service = self.inner.clone();
         async move {
-            debug!(target: LOG_TARGET, "Serializing outbound message {:?}", message.tag);
+            trace!(target: LOG_TARGET, "Serializing outbound message {:?}", message.tag);
 
             let DhtOutboundMessage {
                 tag,
-                destination_peer,
+                destination_node_id,
                 custom_header,
                 body,
                 ephemeral_public_key,
@@ -89,6 +89,7 @@ where S: Service<OutboundMessage, Response = (), Error = PipelineError> + Clone 
                 network: network as i32,
                 flags: dht_flags.bits(),
                 destination: Some(destination.into()),
+                message_tag: tag.as_value(),
             });
             let envelope = DhtEnvelope::new(dht_header, body);
 
@@ -97,7 +98,7 @@ where S: Service<OutboundMessage, Response = (), Error = PipelineError> + Clone 
             next_service
                 .oneshot(OutboundMessage {
                     tag,
-                    peer_node_id: destination_peer.node_id,
+                    peer_node_id: destination_node_id,
                     reply_tx: reply_tx.into_inner(),
                     body,
                 })
@@ -106,6 +107,7 @@ where S: Service<OutboundMessage, Response = (), Error = PipelineError> + Clone 
     }
 }
 
+#[derive(Default)]
 pub struct SerializeLayer;
 
 impl SerializeLayer {

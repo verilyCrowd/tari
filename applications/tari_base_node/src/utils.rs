@@ -20,8 +20,9 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+use chrono::NaiveDateTime;
 use futures::{Stream, StreamExt};
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tari_wallet::transaction_service::handle::TransactionEvent;
 use tokio::sync::broadcast::RecvError;
 
@@ -47,7 +48,7 @@ where S: Stream<Item = Result<Arc<TransactionEvent>, RecvError>> + Unpin {
                     }
                 },
                 Err(e) => {
-                    log::error!(target: LOG_TARGET, "Error reading from event broadcast channel {:?}", e);
+                    log::warn!(target: LOG_TARGET, "Error reading from event broadcast channel {:?}", e);
                     break false;
                 },
             },
@@ -55,5 +56,40 @@ where S: Stream<Item = Result<Arc<TransactionEvent>, RecvError>> + Unpin {
                 break false;
             },
         }
+    }
+}
+
+pub fn format_duration_basic(duration: Duration) -> String {
+    let secs = duration.as_secs();
+    if secs > 60 {
+        let mins = secs / 60;
+        if mins > 60 {
+            let hours = mins / 60;
+            format!("{}h {}m {}s", hours, mins % 60, secs % 60)
+        } else {
+            format!("{}m {}s", mins, secs % 60)
+        }
+    } else {
+        format!("{}s", secs)
+    }
+}
+
+/// Standard formatting helper function for a NaiveDateTime
+pub fn format_naive_datetime(dt: &NaiveDateTime) -> String {
+    dt.format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn formats_duration() {
+        let s = format_duration_basic(Duration::from_secs(5));
+        assert_eq!(s, "5s");
+        let s = format_duration_basic(Duration::from_secs(23 * 60 + 10));
+        assert_eq!(s, "23m 10s");
+        let s = format_duration_basic(Duration::from_secs(9 * 60 * 60 + 35 * 60 + 45));
+        assert_eq!(s, "9h 35m 45s");
     }
 }

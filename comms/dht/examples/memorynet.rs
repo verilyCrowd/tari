@@ -36,9 +36,10 @@
 //! `RUST_BACKTRACE=1 RUST_LOG=trace cargo run --example memorynet 2> /tmp/debug.log`
 
 // Size of network
-const NUM_NODES: usize = 39;
+const NUM_NODES: usize = 40;
 // Must be at least 2
-const NUM_WALLETS: usize = 8;
+const NUM_WALLETS: usize = 6;
+const QUIET_MODE: bool = true;
 
 mod memory_net;
 
@@ -68,10 +69,17 @@ use tari_comms::{
     ConnectionManagerEvent,
     PeerConnection,
 };
-use tari_comms_dht::{envelope::NodeDestination, inbound::DecryptedDhtMessage, Dht, DhtBuilder};
+use tari_comms_dht::{
+    domain_message::OutboundDomainMessage,
+    envelope::NodeDestination,
+    inbound::DecryptedDhtMessage,
+    outbound::OutboundEncryption,
+    Dht,
+    DhtBuilder,
+};
 use tari_storage::{lmdb_store::LMDBBuilder, LMDBWrapper};
 use tari_test_utils::{paths::create_temporary_data_path, random};
-use tokio::{runtime, time};
+use tokio::{runtime, task, time};
 use tower::ServiceBuilder;
 
 type MessagingEventRx = mpsc::UnboundedReceiver<(NodeId, NodeId)>;
@@ -144,7 +152,7 @@ async fn main() {
 
     let (messaging_events_tx, mut messaging_events_rx) = mpsc::unbounded();
 
-    let mut seed_node = make_node(PeerFeatures::COMMUNICATION_NODE, None, messaging_events_tx.clone()).await;
+    let seed_node = make_node(PeerFeatures::COMMUNICATION_NODE, None, messaging_events_tx.clone()).await;
 
     let mut nodes = future::join_all(
         repeat_with(|| {
@@ -175,15 +183,18 @@ async fn main() {
             "Node '{}' is joining the network via the seed node '{}'",
             node, seed_node
         );
-        node.dht.dht_requester().send_join().await.unwrap();
+        node.comms
+            .connectivity()
+            .wait_for_connectivity(Duration::from_secs(10))
+            .await
+            .unwrap();
 
-        seed_node.expect_peer_connection(&node.get_node_id()).await.unwrap();
-        println!();
+        node.dht.dht_requester().send_join().await.unwrap();
     }
 
     take_a_break().await;
 
-    peer_list_summary(&nodes).await;
+    // peer_list_summary(&nodes).await;
 
     banner!(
         "Now, {} wallets are going to join from a random base node.",
@@ -196,16 +207,13 @@ async fn main() {
             wallet,
             get_name(&wallet.seed_peer.as_ref().unwrap().node_id)
         );
-        wallet.dht.dht_requester().send_join().await.unwrap();
-        let seed_node_id = &wallet.seed_peer.as_ref().unwrap().node_id;
-        nodes
-            .iter_mut()
-            .find(|n| &n.get_node_id() == seed_node_id)
-            .expect("node must exist")
-            .expect_peer_connection(&wallet.get_node_id())
+        wallet
+            .comms
+            .connectivity()
+            .wait_for_connectivity(Duration::from_secs(10))
             .await
             .unwrap();
-        println!();
+        wallet.dht.dht_requester().send_join().await.unwrap();
     }
 
     let mut total_messages = 0;
@@ -213,18 +221,42 @@ async fn main() {
     take_a_break().await;
     total_messages += drain_messaging_events(&mut messaging_events_rx, false).await;
 
-    peer_list_summary(&wallets).await;
+    network_peer_list_stats(&nodes, &wallets).await;
+    network_connectivity_stats(&nodes, &wallets).await;
+
+    {
+        let count = seed_node.comms.peer_manager().count().await;
+        println!("Seed node knows {} peers", count);
+    }
 
     total_messages += discovery(&wallets, &mut messaging_events_rx).await;
 
     take_a_break().await;
     total_messages += drain_messaging_events(&mut messaging_events_rx, false).await;
 
-    let random_wallet = wallets.remove(OsRng.gen_range(0, wallets.len() - 1));
-    total_messages +=
-        do_store_and_forward_discovery(random_wallet, &wallets, messaging_events_tx, &mut messaging_events_rx).await;
+    for _ in 0..5 {
+        let random_wallet = wallets.remove(OsRng.gen_range(0, wallets.len() - 1));
+        let (num_msgs, random_wallet) = do_store_and_forward_message_propagation(
+            random_wallet,
+            &wallets,
+            messaging_events_tx.clone(),
+            &mut messaging_events_rx,
+        )
+        .await;
+        total_messages += num_msgs;
+        // Put the wallet back
+        wallets.push(random_wallet);
+    }
+
+    do_network_wide_propagation(&mut nodes).await;
+
+    total_messages += drain_messaging_events(&mut messaging_events_rx, false).await;
 
     println!("{} messages sent in total across the network", total_messages);
+
+    network_peer_list_stats(&nodes, &wallets).await;
+    network_connectivity_stats(&nodes, &wallets).await;
+
     banner!("That's it folks! Network is shutting down...");
 
     shutdown_all(nodes).await;
@@ -244,9 +276,11 @@ async fn discovery(wallets: &[TestNode], messaging_events_rx: &mut MessagingEven
         let wallet1 = wallets.get(i).unwrap();
         let wallet2 = wallets.get(i + 1).unwrap();
 
-        banner!("'{}' is going to try discover '{}'.", wallet1, wallet2);
+        banner!("🌎 '{}' is going to try discover '{}'.", wallet1, wallet2);
 
-        peer_list_summary(&[wallet1, wallet2]).await;
+        if !QUIET_MODE {
+            peer_list_summary(&[wallet1, wallet2]).await;
+        }
 
         let start = Instant::now();
         let discovery_result = wallet1
@@ -254,22 +288,20 @@ async fn discovery(wallets: &[TestNode], messaging_events_rx: &mut MessagingEven
             .discovery_service_requester()
             .discover_peer(
                 Box::new(wallet2.node_identity().public_key().clone()),
-                NodeDestination::Unknown,
+                wallet2.node_identity().node_id().clone().into(),
             )
             .await;
-
-        let end = Instant::now();
 
         match discovery_result {
             Ok(peer) => {
                 successes += 1;
-                total_time += end - start;
+                total_time += start.elapsed();
                 banner!(
                     "⚡️🎉😎 '{}' discovered peer '{}' ({}) in {}ms",
                     wallet1,
                     get_name(&peer.node_id),
                     peer,
-                    (end - start).as_millis()
+                    start.elapsed().as_millis()
                 );
 
                 time::delay_for(Duration::from_secs(5)).await;
@@ -280,7 +312,7 @@ async fn discovery(wallets: &[TestNode], messaging_events_rx: &mut MessagingEven
                     "💩 '{}' failed to discover '{}' after {}ms because '{:?}'",
                     wallet1,
                     wallet2,
-                    (end - start).as_millis(),
+                    start.elapsed().as_millis(),
                     err
                 );
 
@@ -333,65 +365,252 @@ async fn peer_list_summary<'a, I: IntoIterator<Item = T>, T: AsRef<TestNode>>(ne
     }
 }
 
-async fn do_store_and_forward_discovery(
+async fn network_peer_list_stats(nodes: &[TestNode], wallets: &[TestNode]) {
+    let mut stats = HashMap::<String, usize>::with_capacity(wallets.len());
+    for wallet in wallets {
+        let mut num_known = 0;
+        for node in nodes {
+            if node
+                .comms
+                .peer_manager()
+                .exists_node_id(wallet.node_identity().node_id())
+                .await
+            {
+                num_known += 1;
+            }
+        }
+        stats.insert(get_name(wallet.node_identity().node_id()), num_known);
+    }
+
+    let mut avg = Vec::with_capacity(wallets.len());
+    for (n, v) in stats {
+        let perc = v as f32 / nodes.len() as f32;
+        avg.push(perc);
+        println!(
+            "{} is known by {} out of {} nodes ({:.2}%)",
+            n,
+            v,
+            nodes.len(),
+            perc * 100.0
+        );
+    }
+    println!(
+        "Average {:.2}%",
+        avg.into_iter().sum::<f32>() / wallets.len() as f32 * 100.0
+    );
+}
+
+async fn network_connectivity_stats(nodes: &[TestNode], wallets: &[TestNode]) {
+    async fn display(nodes: &[TestNode]) -> (usize, usize) {
+        let mut total = 0;
+        let mut avg = Vec::new();
+        for node in nodes {
+            let conns = node.comms.connection_manager().get_active_connections().await.unwrap();
+            total += conns.len();
+            avg.push(conns.len());
+
+            if !QUIET_MODE {
+                println!("{} connected to {} nodes", node, conns.len());
+                for c in conns {
+                    println!("  {} ({})", get_name(c.peer_node_id()), c.direction());
+                }
+            }
+        }
+        (total, avg.into_iter().sum())
+    }
+    let (mut total, mut avg) = display(nodes).await;
+    let (t, a) = display(wallets).await;
+    total += t;
+    avg += a;
+    println!(
+        "{} total connections on the network. ({} per node on average)",
+        total,
+        avg / (wallets.len() + nodes.len())
+    );
+}
+
+async fn do_network_wide_propagation(nodes: &mut [TestNode]) {
+    let random_node = &nodes[OsRng.gen_range(0, nodes.len() - 1)];
+    let random_node_id = random_node.comms.node_identity().node_id().clone();
+    const PUBLIC_MESSAGE: &str = "This is something you're all interested in!";
+
+    banner!("🌎 {} is going to broadcast a message to the network", random_node);
+    random_node
+        .dht
+        .outbound_requester()
+        .broadcast(
+            NodeDestination::Unknown,
+            OutboundEncryption::None,
+            vec![],
+            OutboundDomainMessage::new(0i32, PUBLIC_MESSAGE.to_string()),
+        )
+        .await
+        .unwrap();
+
+    // Spawn task for each peer that will read the message and propagate it on
+    let tasks = nodes
+        .into_iter()
+        .filter(|n| n.comms.node_identity().node_id() != &random_node_id)
+        .enumerate()
+        .map(|(idx, node)| {
+            let mut outbound_req = node.dht.outbound_requester();
+            let mut ims_rx = node.ims_rx.take().unwrap();
+            let start = Instant::now();
+            let node_name = node.name.clone();
+
+            task::spawn(async move {
+                let result = time::timeout(Duration::from_secs(5), ims_rx.next()).await;
+                let mut is_success = false;
+                match result {
+                    Ok(Some(msg)) => {
+                        let public_msg = msg
+                            .decryption_result
+                            .unwrap()
+                            .decode_part::<String>(1)
+                            .unwrap()
+                            .unwrap();
+                        println!("📬 {} got public message '{}'", node_name, public_msg);
+                        is_success = true;
+                        let send_states = outbound_req
+                            .propagate(
+                                NodeDestination::Unknown,
+                                OutboundEncryption::None,
+                                vec![msg.source_peer.node_id.clone()],
+                                OutboundDomainMessage::new(0i32, public_msg),
+                            )
+                            .await
+                            .unwrap();
+                        println!("🦠 {} propagated to {} peer(s)", node_name, send_states.len());
+                    },
+                    Err(_) | Ok(None) => {
+                        banner!(
+                            "💩 {} failed to receive network message after {}ms",
+                            node_name,
+                            start.elapsed().as_millis(),
+                        );
+                    },
+                }
+
+                (idx, ims_rx, is_success)
+            })
+        });
+
+    // Put the ims_rxs back
+    let ims_rxs = future::join_all(tasks).await;
+    let mut num_successes = 0;
+    for ims in ims_rxs {
+        let (idx, ims_rx, is_success) = ims.unwrap();
+        nodes[idx].ims_rx = Some(ims_rx);
+        if is_success {
+            num_successes += 1;
+        }
+    }
+
+    banner!(
+        "🙌 Finished propagation test. {} out of {} nodes received the message",
+        num_successes,
+        nodes.len() - 1
+    );
+}
+
+async fn do_store_and_forward_message_propagation(
     wallet: TestNode,
     wallets: &[TestNode],
     messaging_tx: MessagingEventTx,
     messaging_rx: &mut MessagingEventRx,
-) -> usize
+) -> (usize, TestNode)
 {
-    println!("{} chosen at random to be discovered using store and forward", wallet);
-    let all_peers = wallet.comms.peer_manager().all().await.unwrap();
+    banner!(
+        "{} chosen at random to be receive messages from other nodes using store and forward",
+        wallet,
+    );
+    let wallets_peers = wallet.comms.peer_manager().all().await.unwrap();
     let node_identity = wallet.comms.node_identity().clone();
 
     banner!("😴 {} is going offline", wallet);
     wallet.comms.shutdown().await;
 
     banner!(
-        "🌎 {} ({}) is going to attempt to discover {} ({})",
-        wallets[0],
-        wallets[0].comms.node_identity().public_key(),
+        "🎤 All other wallets are going to attempt to broadcast messages to {} ({})",
         get_name(node_identity.node_id()),
         node_identity.public_key(),
     );
-    let mut first_wallet_discovery_req = wallets[0].dht.discovery_service_requester();
 
     let start = Instant::now();
-    let discovery_task = runtime::Handle::current().spawn({
-        let node_identity = node_identity.clone();
-        let dest_public_key = Box::new(node_identity.public_key().clone());
-        async move {
-            first_wallet_discovery_req
-                .discover_peer(dest_public_key.clone(), NodeDestination::PublicKey(dest_public_key))
-                .await
-        }
-    });
+    for wallet in wallets {
+        let secret_message = format!("My name is wiki wiki {}", wallet);
+        wallet
+            .dht
+            .outbound_requester()
+            .broadcast(
+                node_identity.node_id().clone().into(),
+                OutboundEncryption::EncryptFor(Box::new(node_identity.public_key().clone())),
+                vec![],
+                OutboundDomainMessage::new(123i32, secret_message.clone()),
+            )
+            .await
+            .unwrap();
+    }
 
-    println!("Waiting a few seconds for discovery to propagate around the network...");
-    time::delay_for(Duration::from_secs(8)).await;
+    banner!("⏰ Waiting a few seconds for messages to propagate around the network...");
+    time::delay_for(Duration::from_secs(5)).await;
 
     let mut total_messages = drain_messaging_events(messaging_rx, false).await;
 
     banner!("🤓 {} is coming back online", get_name(node_identity.node_id()));
     let (tx, ims_rx) = mpsc::channel(1);
-    let (comms, dht) = setup_comms_dht(node_identity, create_peer_storage(all_peers), tx).await;
-    let wallet = TestNode::new(comms, dht, None, ims_rx, messaging_tx);
+    let (comms, dht) = setup_comms_dht(node_identity, create_peer_storage(wallets_peers), tx).await;
+    let mut wallet = TestNode::new(comms, dht, None, ims_rx, messaging_tx);
+    wallet
+        .comms
+        .connectivity()
+        .wait_for_connectivity(Duration::from_secs(10))
+        .await
+        .unwrap();
+    wallet
+        .dht
+        .store_and_forward_requester()
+        .request_saf_messages_from_neighbours()
+        .await
+        .unwrap();
 
-    wallet.dht.dht_requester().send_request_stored_messages().await.unwrap();
+    let mut num_msgs = 0;
+    loop {
+        let result = time::timeout(Duration::from_secs(10), wallet.ims_rx.as_mut().unwrap().next()).await;
+        num_msgs += 1;
+        match result {
+            Ok(msg) => {
+                let msg = msg.unwrap();
+                let secret_msg = msg
+                    .decryption_result
+                    .unwrap()
+                    .decode_part::<String>(1)
+                    .unwrap()
+                    .unwrap();
+                banner!(
+                    "🎉 Wallet {} received propagated message '{}' from store and forward in {}ms",
+                    wallet,
+                    secret_msg,
+                    start.elapsed().as_millis()
+                );
+            },
+            Err(err) => {
+                banner!(
+                    "💩 Failed to receive message after {}ms using store and forward '{:?}'",
+                    start.elapsed().as_millis(),
+                    err
+                );
+            },
+        };
 
-    total_messages += match discovery_task.await.unwrap() {
-        Ok(peer) => {
-            let end = Instant::now();
-            banner!("🎉 Discovered peer {} in {}ms", peer, (end - start).as_millis());
-            drain_messaging_events(messaging_rx, false).await
-        },
-        Err(err) => {
-            banner!("💩 Failed to discovery peer using store and forward '{:?}'", err);
-            drain_messaging_events(messaging_rx, true).await
-        },
-    };
+        if num_msgs == wallets.len() {
+            break;
+        }
+    }
 
-    total_messages
+    total_messages += drain_messaging_events(messaging_rx, false).await;
+
+    (total_messages, wallet)
 }
 
 async fn drain_messaging_events(messaging_rx: &mut MessagingEventRx, show_logs: bool) -> usize {
@@ -413,6 +632,9 @@ async fn drain_messaging_events(messaging_rx: &mut MessagingEventRx, show_logs: 
                         node_id_buf.len(),
                         node_id_buf.drain(..).map(get_short_name).collect::<Vec<_>>().join(", ")
                     );
+
+                    last_from_node = Some(from_node);
+                    node_id_buf.push(to_node)
                 },
                 None => {
                     last_from_node = Some(from_node);
@@ -434,6 +656,9 @@ fn connection_manager_logger(
 ) -> impl FnMut(Arc<ConnectionManagerEvent>) -> Arc<ConnectionManagerEvent> {
     let node_name = get_name(&node_id);
     move |event| {
+        if QUIET_MODE {
+            return event;
+        }
         use ConnectionManagerEvent::*;
         print!("EVENT: ");
         match &*event {
@@ -494,7 +719,7 @@ struct TestNode {
     seed_peer: Option<Peer>,
     dht: Dht,
     conn_man_events_rx: mpsc::Receiver<Arc<ConnectionManagerEvent>>,
-    _ims_rx: mpsc::Receiver<DecryptedDhtMessage>,
+    ims_rx: Option<mpsc::Receiver<DecryptedDhtMessage>>,
 }
 
 impl TestNode {
@@ -517,7 +742,7 @@ impl TestNode {
             seed_peer,
             comms,
             dht,
-            _ims_rx: ims_rx,
+            ims_rx: Some(ims_rx),
             conn_man_events_rx: events_rx,
         }
     }
@@ -565,19 +790,18 @@ impl TestNode {
     }
 
     #[inline]
-    pub fn get_node_id(&self) -> NodeId {
-        self.node_identity().node_id().clone()
-    }
-
-    #[inline]
     pub fn to_peer(&self) -> Peer {
         self.comms.node_identity().to_peer()
     }
 
+    #[allow(dead_code)]
     pub async fn expect_peer_connection(&mut self, node_id: &NodeId) -> Option<PeerConnection> {
+        if let Some(conn) = self.comms.connectivity().get_connection(node_id.clone()).await.unwrap() {
+            return Some(conn);
+        }
         use ConnectionManagerEvent::*;
         loop {
-            let event = time::timeout(Duration::from_secs(10), self.conn_man_events_rx.next())
+            let event = time::timeout(Duration::from_secs(30), self.conn_man_events_rx.next())
                 .await
                 .ok()??;
 
@@ -657,6 +881,7 @@ async fn setup_comms_dht(
         .with_listener_address(node_identity.public_address())
         .with_transport(MemoryTransport)
         .with_node_identity(node_identity)
+        .with_min_connectivity(0.3)
         .with_peer_storage(storage)
         .with_dial_backoff(ConstantBackoff::new(Duration::from_millis(1000)))
         .build()
@@ -666,13 +891,18 @@ async fn setup_comms_dht(
         comms.node_identity(),
         comms.peer_manager(),
         outbound_tx,
-        comms.connection_manager_requester(),
+        comms.connectivity(),
         comms.shutdown_signal(),
     )
     .local_test()
-    .with_discovery_timeout(Duration::from_secs(60))
-    .with_num_neighbouring_nodes(8)
-    .finish();
+    .enable_auto_join()
+    .with_discovery_timeout(Duration::from_secs(15))
+    .with_num_neighbouring_nodes(10)
+    .with_num_random_nodes(5)
+    .with_propagation_factor(4)
+    .finish()
+    .await
+    .unwrap();
 
     let dht_outbound_layer = dht.outbound_middleware_layer();
 
@@ -700,5 +930,5 @@ async fn setup_comms_dht(
 
 async fn take_a_break() {
     banner!("Taking a break for a few seconds to let things settle...");
-    time::delay_for(Duration::from_millis(NUM_NODES as u64 * 500)).await;
+    time::delay_for(Duration::from_millis(NUM_NODES as u64 * 50)).await;
 }

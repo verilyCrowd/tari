@@ -81,6 +81,8 @@ pub struct DecryptedDhtMessage {
     pub source_peer: Arc<Peer>,
     pub authenticated_origin: Option<CommsPublicKey>,
     pub dht_header: DhtMessageHeader,
+    pub is_saf_message: bool,
+    pub is_saf_stored: Option<bool>,
     pub decryption_result: Result<EnvelopeBody, Vec<u8>>,
 }
 
@@ -97,6 +99,8 @@ impl DecryptedDhtMessage {
             source_peer: message.source_peer,
             authenticated_origin,
             dht_header: message.dht_header,
+            is_saf_message: message.is_saf_message,
+            is_saf_stored: None,
             decryption_result: Ok(message_body),
         }
     }
@@ -108,6 +112,8 @@ impl DecryptedDhtMessage {
             source_peer: message.source_peer,
             authenticated_origin: None,
             dht_header: message.dht_header,
+            is_saf_message: message.is_saf_message,
+            is_saf_stored: None,
             decryption_result: Err(message.body),
         }
     }
@@ -154,5 +160,9 @@ impl DecryptedDhtMessage {
             Ok(b) => b.total_size(),
             Err(b) => b.len(),
         }
+    }
+
+    pub fn set_saf_stored(&mut self, is_stored: bool) {
+        self.is_saf_stored = Some(is_stored);
     }
 }

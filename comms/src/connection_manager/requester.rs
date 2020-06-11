@@ -33,17 +33,19 @@ use tokio::sync::broadcast;
 #[derive(Debug)]
 pub enum ConnectionManagerRequest {
     /// Dial a given peer by node id.
-    /// Parameters:
-    /// 1. Node Id to dial
     DialPeer(NodeId, oneshot::Sender<Result<PeerConnection, ConnectionManagerError>>),
+    /// Cancels a pending dial if one exists
+    CancelDial(NodeId),
     /// Register a oneshot to get triggered when the node is listening, or has failed to listen
     NotifyListening(oneshot::Sender<Multiaddr>),
     /// Retrieve an active connection for a given node id if one exists.
     GetActiveConnection(NodeId, oneshot::Sender<Option<PeerConnection>>),
     /// Retrieve all active connections
     GetActiveConnections(oneshot::Sender<Vec<PeerConnection>>),
+    /// Retrieve the number of active connections
+    GetNumActiveConnections(oneshot::Sender<usize>),
     /// Disconnect a peer
-    DisconnectPeer(NodeId, oneshot::Sender<Result<(), ConnectionManagerError>>),
+    DisconnectPeer(NodeId),
 }
 
 /// Responsible for constructing requests to the ConnectionManagerService
@@ -95,9 +97,9 @@ macro_rules! request_fn {
 impl ConnectionManagerRequester {
     request_fn!(get_active_connections() -> Vec<PeerConnection>, request = ConnectionManagerRequest::GetActiveConnections);
 
-    request_fn!(get_active_connection(node_id: NodeId) -> Option<PeerConnection>, request = ConnectionManagerRequest::GetActiveConnection);
+    request_fn!(get_num_active_connections() -> usize, request = ConnectionManagerRequest::GetNumActiveConnections);
 
-    request_fn!(disconnect_peer(node_id: NodeId) -> Result<(), ConnectionManagerError>, request = ConnectionManagerRequest::DisconnectPeer);
+    request_fn!(get_active_connection(node_id: NodeId) -> Option<PeerConnection>, request = ConnectionManagerRequest::GetActiveConnection);
 
     /// Returns a ConnectionManagerEvent stream
     pub fn get_event_subscription(&self) -> broadcast::Receiver<Arc<ConnectionManagerEvent>> {
@@ -107,13 +109,49 @@ impl ConnectionManagerRequester {
     /// Attempt to connect to a remote peer
     pub async fn dial_peer(&mut self, node_id: NodeId) -> Result<PeerConnection, ConnectionManagerError> {
         let (reply_tx, reply_rx) = oneshot::channel();
+        self.send_dial_peer(node_id, reply_tx).await?;
+        reply_rx
+            .await
+            .map_err(|_| ConnectionManagerError::ActorRequestCanceled)?
+    }
+
+    /// Send instruction to ConnectionManager to dial a peer and return the result on the given oneshot
+    pub async fn cancel_dial(&mut self, node_id: NodeId) -> Result<(), ConnectionManagerError> {
+        self.sender
+            .send(ConnectionManagerRequest::CancelDial(node_id))
+            .await
+            .map_err(|_| ConnectionManagerError::SendToActorFailed)?;
+        Ok(())
+    }
+
+    /// Send instruction to ConnectionManager to dial a peer and return the result on the given oneshot
+    pub(crate) async fn send_dial_peer(
+        &mut self,
+        node_id: NodeId,
+        reply_tx: oneshot::Sender<Result<PeerConnection, ConnectionManagerError>>,
+    ) -> Result<(), ConnectionManagerError>
+    {
         self.sender
             .send(ConnectionManagerRequest::DialPeer(node_id, reply_tx))
             .await
             .map_err(|_| ConnectionManagerError::SendToActorFailed)?;
-        reply_rx
+        Ok(())
+    }
+
+    /// Send instruction to ConnectionManager to dial a peer without waiting for a result.
+    pub(crate) async fn send_dial_peer_no_reply(&mut self, node_id: NodeId) -> Result<(), ConnectionManagerError> {
+        let (reply_tx, _) = oneshot::channel();
+        self.send_dial_peer(node_id, reply_tx).await?;
+        Ok(())
+    }
+
+    /// Disconnect a peer. The peer will disconnect after a preconfigured linger time.
+    pub async fn disconnect_peer(&mut self, node_id: NodeId) -> Result<(), ConnectionManagerError> {
+        self.sender
+            .send(ConnectionManagerRequest::DisconnectPeer(node_id))
             .await
-            .map_err(|_| ConnectionManagerError::ActorRequestCanceled)?
+            .map_err(|_| ConnectionManagerError::SendToActorFailed)?;
+        Ok(())
     }
 
     /// Return the listening address of this node's listener. This will asynchronously block until the listener has

@@ -30,12 +30,12 @@ use crate::{
     store_forward::message::StoredMessagePriority,
 };
 use chrono::{DateTime, NaiveDateTime, Utc};
-use diesel::{BoolExpressionMethods, ExpressionMethods, QueryDsl, RunQueryDsl};
+use diesel::{dsl, result::DatabaseErrorKind, BoolExpressionMethods, ExpressionMethods, QueryDsl, RunQueryDsl};
 use tari_comms::{
     peer_manager::{node_id::NodeDistance, NodeId},
     types::CommsPublicKey,
 };
-use tari_crypto::tari_utilities::hex::Hex;
+use tari_utilities::hex::Hex;
 
 pub struct StoreAndForwardDatabase {
     connection: DbConnection,
@@ -46,13 +46,31 @@ impl StoreAndForwardDatabase {
         Self { connection }
     }
 
-    pub async fn insert_message(&self, message: NewStoredMessage) -> Result<(), StorageError> {
+    pub async fn insert_message_if_unique(&self, message: NewStoredMessage) -> Result<(), StorageError> {
         self.connection
-            .with_connection_async(|conn| {
-                diesel::insert_into(stored_messages::table)
+            .with_connection_async(move |conn| {
+                match diesel::insert_into(stored_messages::table)
                     .values(message)
-                    .execute(conn)?;
-                Ok(())
+                    .execute(conn)
+                {
+                    Ok(_) => Ok(()),
+                    Err(diesel::result::Error::DatabaseError(kind, e_info)) => match kind {
+                        DatabaseErrorKind::UniqueViolation => Ok(()),
+                        _ => Err(diesel::result::Error::DatabaseError(kind, e_info).into()),
+                    },
+                    Err(e) => Err(e.into()),
+                }
+            })
+            .await
+    }
+
+    pub async fn remove_message(&self, message_ids: Vec<i32>) -> Result<usize, StorageError> {
+        self.connection
+            .with_connection_async(move |conn| {
+                diesel::delete(stored_messages::table)
+                    .filter(stored_messages::id.eq_any(message_ids))
+                    .execute(conn)
+                    .map_err(Into::into)
             })
             .await
     }
@@ -132,7 +150,7 @@ impl StoreAndForwardDatabase {
                     .filter(|message| match message.destination_node_id {
                         Some(ref dest_node_id) => match NodeId::from_hex(dest_node_id).ok() {
                             Some(dest_node_id) => {
-                                &dest_node_id == node_id || &dest_node_id.distance(node_id) <= &*dist_threshold
+                                &dest_node_id == node_id || dest_node_id.distance(node_id) <= *dist_threshold
                             },
                             None => false,
                         },
@@ -159,6 +177,32 @@ impl StoreAndForwardDatabase {
                     .filter(stored_messages::destination_pubkey.is_null())
                     .filter(stored_messages::is_encrypted.eq(true))
                     .filter(stored_messages::message_type.eq(DhtMessageType::None as i32))
+                    .into_boxed();
+
+                if let Some(since) = since {
+                    query = query.filter(stored_messages::stored_at.gt(since.naive_utc()));
+                }
+
+                query
+                    .order_by(stored_messages::stored_at.desc())
+                    .limit(limit)
+                    .get_results(conn)
+                    .map_err(Into::into)
+            })
+            .await
+    }
+
+    pub async fn find_join_messages(
+        &self,
+        since: Option<DateTime<Utc>>,
+        limit: i64,
+    ) -> Result<Vec<StoredMessage>, StorageError>
+    {
+        self.connection
+            .with_connection_async(move |conn| {
+                let mut query = stored_messages::table
+                    .select(stored_messages::all_columns)
+                    .filter(stored_messages::message_type.eq(DhtMessageType::Join as i32))
                     .into_boxed();
 
                 if let Some(since) = since {
@@ -232,6 +276,29 @@ impl StoreAndForwardDatabase {
             })
             .await
     }
+
+    pub(crate) async fn truncate_messages(&self, max_size: usize) -> Result<usize, StorageError> {
+        self.connection
+            .with_connection_async(move |conn| {
+                let mut num_removed = 0;
+                let msg_count = stored_messages::table
+                    .select(dsl::count(stored_messages::id))
+                    .first::<i64>(conn)? as usize;
+                if msg_count > max_size {
+                    let remove_count = msg_count - max_size;
+                    let message_ids: Vec<i32> = stored_messages::table
+                        .select(stored_messages::id)
+                        .order_by(stored_messages::stored_at.asc())
+                        .limit(remove_count as i64)
+                        .get_results(conn)?;
+                    num_removed = diesel::delete(stored_messages::table)
+                        .filter(stored_messages::id.eq_any(message_ids))
+                        .execute(conn)?;
+                }
+                Ok(num_removed)
+            })
+            .await
+    }
 }
 
 #[cfg(test)]
@@ -242,11 +309,72 @@ mod test {
     #[tokio_macros::test_basic]
     async fn insert_messages() {
         let conn = DbConnection::connect_memory(random::string(8)).await.unwrap();
-        // let conn = DbConnection::connect_path("/tmp/tmp.db").await.unwrap();
         conn.migrate().await.unwrap();
         let db = StoreAndForwardDatabase::new(conn);
-        db.insert_message(Default::default()).await.unwrap();
+        let mut msg1 = NewStoredMessage::default();
+        msg1.body_hash.push('1');
+        let mut msg2 = NewStoredMessage::default();
+        msg2.body_hash.push('2');
+        let mut msg3 = NewStoredMessage::default();
+        msg3.body_hash.push('2'); // Duplicate message
+        db.insert_message_if_unique(msg1.clone()).await.unwrap();
+        db.insert_message_if_unique(msg2.clone()).await.unwrap();
+        db.insert_message_if_unique(msg3.clone()).await.unwrap();
+        let messages = db.get_all_messages().await.unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].body_hash, msg1.body_hash);
+        assert_eq!(messages[1].body_hash, msg2.body_hash);
+    }
+
+    #[tokio_macros::test_basic]
+    async fn remove_messages() {
+        let conn = DbConnection::connect_memory(random::string(8)).await.unwrap();
+        conn.migrate().await.unwrap();
+        let db = StoreAndForwardDatabase::new(conn);
+        // Create 3 unique messages
+        let mut msg1 = NewStoredMessage::default();
+        msg1.body_hash.push('1');
+        let mut msg2 = NewStoredMessage::default();
+        msg2.body_hash.push('2');
+        let mut msg3 = NewStoredMessage::default();
+        msg3.body_hash.push('3');
+        db.insert_message_if_unique(msg1.clone()).await.unwrap();
+        db.insert_message_if_unique(msg2.clone()).await.unwrap();
+        db.insert_message_if_unique(msg3.clone()).await.unwrap();
+        let messages = db.get_all_messages().await.unwrap();
+        assert_eq!(messages.len(), 3);
+        let msg1_id = messages[0].id;
+        let msg2_id = messages[1].id;
+        let msg3_id = messages[2].id;
+
+        db.remove_message(vec![msg1_id, msg3_id]).await.unwrap();
         let messages = db.get_all_messages().await.unwrap();
         assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, msg2_id);
+    }
+
+    #[tokio_macros::test_basic]
+    async fn truncate_messages() {
+        let conn = DbConnection::connect_memory(random::string(8)).await.unwrap();
+        conn.migrate().await.unwrap();
+        let db = StoreAndForwardDatabase::new(conn);
+        let mut msg1 = NewStoredMessage::default();
+        msg1.body_hash.push('1');
+        let mut msg2 = NewStoredMessage::default();
+        msg2.body_hash.push('2');
+        let mut msg3 = NewStoredMessage::default();
+        msg3.body_hash.push('3');
+        let mut msg4 = NewStoredMessage::default();
+        msg4.body_hash.push('4');
+        db.insert_message_if_unique(msg1.clone()).await.unwrap();
+        db.insert_message_if_unique(msg2.clone()).await.unwrap();
+        db.insert_message_if_unique(msg3.clone()).await.unwrap();
+        db.insert_message_if_unique(msg4.clone()).await.unwrap();
+        let num_removed = db.truncate_messages(2).await.unwrap();
+        assert_eq!(num_removed, 2);
+        let messages = db.get_all_messages().await.unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].body_hash, msg3.body_hash);
+        assert_eq!(messages[1].body_hash, msg4.body_hash);
     }
 }

@@ -26,7 +26,6 @@ use crate::{
     inbound::message::{DecryptedDhtMessage, DhtInboundMessage},
     proto::envelope::OriginMac,
 };
-use derive_error::Error;
 use futures::{task::Context, Future};
 use log::*;
 use prost::Message;
@@ -38,24 +37,25 @@ use tari_comms::{
     types::CommsPublicKey,
     utils::signature,
 };
-use tari_crypto::tari_utilities::ByteArray;
+use tari_utilities::ByteArray;
+use thiserror::Error;
 use tower::{layer::Layer, Service, ServiceExt};
 
 const LOG_TARGET: &str = "comms::middleware::decryption";
 
 #[derive(Error, Debug)]
 enum DecryptionError {
-    /// Failed to validate origin MAC signature
+    #[error("Failed to validate origin MAC signature")]
     OriginMacInvalidSignature,
-    /// Origin MAC contained an invalid public key
+    #[error("Origin MAC contained an invalid public key")]
     OriginMacInvalidPublicKey,
-    /// Origin MAC not provided for encrypted message
+    #[error("Origin MAC not provided for encrypted message")]
     OriginMacNotProvided,
-    /// Failed to decrypt origin MAC
+    #[error("Failed to decrypt origin MAC")]
     OriginMacDecryptedFailed,
-    /// Failed to decode clear-text origin MAC
+    #[error("Failed to decode clear-text origin MAC")]
     OriginMacClearTextDecodeFailed,
-    /// Failed to decrypt message body
+    #[error("Failed to decrypt message body")]
     MessageBodyDecryptionFailed,
 }
 
@@ -125,6 +125,12 @@ where S: Service<DecryptedDhtMessage, Response = (), Error = PipelineError>
         if !dht_header.flags.contains(DhtMessageFlags::ENCRYPTED) {
             return Self::success_not_encrypted(next_service, message).await;
         }
+        trace!(
+            target: LOG_TARGET,
+            "Decrypting message {} (Trace: {})",
+            message.tag,
+            message.dht_header.message_tag
+        );
 
         let e_pk = dht_header
             .ephemeral_public_key
@@ -144,23 +150,38 @@ where S: Service<DecryptedDhtMessage, Response = (), Error = PipelineError>
                 public_key
             },
             Err(err) => {
-                debug!(target: LOG_TARGET, "Unable to decrypt message origin: {}", err);
+                trace!(
+                    target: LOG_TARGET,
+                    "Unable to decrypt message origin: {}, {} (Trace: {})",
+                    err,
+                    message.tag,
+                    message.dht_header.message_tag
+                );
                 return Self::decryption_failed(next_service, &node_identity, message).await;
             },
         };
 
-        debug!(
+        trace!(
             target: LOG_TARGET,
-            "Attempting to decrypt message body from origin public key '{}'", authenticated_origin
+            "Attempting to decrypt message body from origin public key '{}', {} (Trace: {})",
+            authenticated_origin,
+            message.tag,
+            message.dht_header.message_tag
         );
         match Self::attempt_decrypt_message_body(&shared_secret, &message.body) {
             Ok(message_body) => {
-                debug!(target: LOG_TARGET, "Message successfully decrypted");
+                debug!(
+                    target: LOG_TARGET,
+                    "Message successfully decrypted, {} (Trace: {})", message.tag, message.dht_header.message_tag
+                );
                 let msg = DecryptedDhtMessage::succeeded(message_body, Some(authenticated_origin), message);
                 next_service.oneshot(msg).await
             },
             Err(err) => {
-                debug!(target: LOG_TARGET, "Unable to decrypt message: {}", err);
+                debug!(
+                    target: LOG_TARGET,
+                    "Unable to decrypt message: {}, {} (Trace: {})", err, message.tag, message.dht_header.message_tag
+                );
                 Self::decryption_failed(next_service, &node_identity, message).await
             },
         }
@@ -192,7 +213,7 @@ where S: Service<DecryptedDhtMessage, Response = (), Error = PipelineError>
         body: &[u8],
     ) -> Result<(), DecryptionError>
     {
-        if signature::verify(public_key, signature, body).unwrap_or(false) {
+        if signature::verify(public_key, signature, body) {
             Ok(())
         } else {
             Err(DecryptionError::OriginMacInvalidSignature)
@@ -249,9 +270,11 @@ where S: Service<DecryptedDhtMessage, Response = (), Error = PipelineError>
 
         match EnvelopeBody::decode(message.body.as_slice()) {
             Ok(deserialized) => {
-                debug!(
+                trace!(
                     target: LOG_TARGET,
-                    "Message is not encrypted. Passing onto next service"
+                    "Message {} is not encrypted. Passing onto next service (Trace: {})",
+                    message.tag,
+                    message.dht_header.message_tag
                 );
                 let msg = DecryptedDhtMessage::succeeded(deserialized, authenticated_pk, message);
                 next_service.oneshot(msg).await
@@ -261,7 +284,10 @@ where S: Service<DecryptedDhtMessage, Response = (), Error = PipelineError>
                 // TODO: Bad node behaviour?
                 debug!(
                     target: LOG_TARGET,
-                    "Unable to deserialize message: {}. Message will be discarded.", err
+                    "Unable to deserialize message {}: {}. Message will be discarded. (Trace: {})",
+                    message.tag,
+                    err,
+                    message.dht_header.message_tag
                 );
                 Ok(())
             },
@@ -281,8 +307,10 @@ where S: Service<DecryptedDhtMessage, Response = (), Error = PipelineError>
             warn!(
                 target: LOG_TARGET,
                 "Received message from peer '{}' that is destined for this node that could not be decrypted. \
-                 Discarding message",
-                message.source_peer.node_id
+                 Discarding message {} (Trace: {})",
+                message.source_peer.node_id,
+                message.tag,
+                message.dht_header.message_tag
             );
             return Err(
                 "Message rejected because this node could not decrypt a message that was addressed to it".into(),

@@ -70,6 +70,8 @@ pub struct ProofOfWork {
     /// but not including this block, tracked separately.
     pub accumulated_monero_difficulty: Difficulty,
     pub accumulated_blake_difficulty: Difficulty,
+    /// The target difficulty for solving the current block using the specified proof of work algorithm.
+    pub target_difficulty: Difficulty,
     /// The algorithm used to mine this block
     pub pow_algo: PowAlgorithm,
     /// Supplemental proof of work data. For example for Blake, this would be empty (only the block header is
@@ -82,6 +84,7 @@ impl Default for ProofOfWork {
         Self {
             accumulated_monero_difficulty: Difficulty::default(),
             accumulated_blake_difficulty: Difficulty::default(),
+            target_difficulty: Difficulty::default(),
             pow_algo: PowAlgorithm::Blake,
             pow_data: vec![],
         }
@@ -96,6 +99,7 @@ impl ProofOfWork {
             pow_algo,
             accumulated_monero_difficulty: Difficulty::default(),
             accumulated_blake_difficulty: Difficulty::default(),
+            target_difficulty: Difficulty::default(),
             pow_data: vec![],
         }
     }
@@ -141,8 +145,8 @@ impl ProofOfWork {
         self.accumulated_monero_difficulty = pow.accumulated_monero_difficulty;
     }
 
-    /// Creates anew proof of work from the provided proof of work difficulty with the sum of this proof of work's total
-    /// cumulative difficulty and the provided `added_difficulty`.
+    /// Creates a new proof of work from the provided proof of work difficulty with the sum of this proof of work's
+    /// total cumulative difficulty and the provided `added_difficulty`.
     pub fn new_from_difficulty(pow: &ProofOfWork, added_difficulty: Difficulty) -> ProofOfWork {
         let (m, b) = match pow.pow_algo {
             PowAlgorithm::Monero => (
@@ -157,6 +161,7 @@ impl ProofOfWork {
         ProofOfWork {
             accumulated_monero_difficulty: m,
             accumulated_blake_difficulty: b,
+            target_difficulty: pow.target_difficulty,
             pow_algo: pow.pow_algo,
             pow_data: pow.pow_data.clone(),
         }
@@ -205,13 +210,17 @@ impl Display for PowAlgorithm {
 
 impl Display for ProofOfWork {
     fn fmt(&self, fmt: &mut Formatter<'_>) -> Result<(), Error> {
-        fmt.write_str(&format!(
-            "Mining algorithm: {}, \nTotal accumulated difficulty: \nMonero={}, Blake={}\nPow data: {}",
-            self.pow_algo,
-            self.accumulated_monero_difficulty,
-            self.accumulated_blake_difficulty,
-            self.pow_data.to_hex(),
-        ))
+        writeln!(
+            fmt,
+            "Mining algorithm: {}, Target difficulty: {}",
+            self.pow_algo, self.target_difficulty
+        )?;
+        writeln!(
+            fmt,
+            "Total accumulated difficulty:\nMonero={}, Blake={}",
+            self.accumulated_monero_difficulty, self.accumulated_blake_difficulty
+        )?;
+        writeln!(fmt, "Pow data: {}", self.pow_data.to_hex())
     }
 }
 
@@ -227,7 +236,8 @@ mod test {
         let pow = ProofOfWork::default();
         assert_eq!(
             &format!("{}", pow),
-            "Mining algorithm: Blake, \nTotal accumulated difficulty: \nMonero=1, Blake=1\nPow data: "
+            "Mining algorithm: Blake, Target difficulty: 1\nTotal accumulated difficulty:\nMonero=1, Blake=1\nPow \
+             data: \n"
         );
     }
 

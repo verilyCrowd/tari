@@ -27,6 +27,7 @@ use crate::{
     memsocket,
     message::{InboundMessage, OutboundMessage},
     multiaddr::{Multiaddr, Protocol},
+    multiplexing::Substream,
     peer_manager::{Peer, PeerFeatures},
     pipeline,
     pipeline::SinkService,
@@ -34,7 +35,6 @@ use crate::{
     runtime,
     test_utils::node_identity::build_node_identity,
     transports::MemoryTransport,
-    types::CommsSubstream,
     CommsNode,
 };
 use bytes::Bytes;
@@ -44,7 +44,7 @@ use tari_storage::HashmapDatabase;
 use tari_test_utils::{collect_stream, unpack_enum};
 
 async fn spawn_node(
-    protocols: Protocols<CommsSubstream>,
+    protocols: Protocols<Substream>,
 ) -> (CommsNode, mpsc::Receiver<InboundMessage>, mpsc::Sender<OutboundMessage>) {
     let addr = format!("/memory/{}", memsocket::acquire_next_memsocket_port())
         .parse::<Multiaddr>()
@@ -181,11 +181,11 @@ async fn peer_to_peer_custom_protocols() {
 async fn peer_to_peer_messaging() {
     const NUM_MSGS: usize = 100;
 
-    let (comms_node1, inbound_rx1, mut outbound_tx1) = spawn_node(Protocols::new()).await;
-    let (comms_node2, inbound_rx2, mut outbound_tx2) = spawn_node(Protocols::new()).await;
+    let (comms_node1, mut inbound_rx1, mut outbound_tx1) = spawn_node(Protocols::new()).await;
+    let (comms_node2, mut inbound_rx2, mut outbound_tx2) = spawn_node(Protocols::new()).await;
 
-    let messaging_events1 = comms_node1.subscribe_messaging_events();
-    let messaging_events2 = comms_node2.subscribe_messaging_events();
+    let mut messaging_events1 = comms_node1.subscribe_messaging_events();
+    let mut messaging_events2 = comms_node2.subscribe_messaging_events();
 
     let node_identity1 = comms_node1.node_identity();
     let node_identity2 = comms_node2.node_identity();
@@ -254,8 +254,8 @@ async fn peer_to_peer_messaging() {
 async fn peer_to_peer_messaging_simultaneous() {
     const NUM_MSGS: usize = 10;
 
-    let (comms_node1, inbound_rx1, mut outbound_tx1) = spawn_node(Protocols::new()).await;
-    let (comms_node2, inbound_rx2, mut outbound_tx2) = spawn_node(Protocols::new()).await;
+    let (comms_node1, mut inbound_rx1, mut outbound_tx1) = spawn_node(Protocols::new()).await;
+    let (comms_node2, mut inbound_rx2, mut outbound_tx2) = spawn_node(Protocols::new()).await;
 
     let o1 = outbound_tx1.clone();
     let o2 = outbound_tx2.clone();

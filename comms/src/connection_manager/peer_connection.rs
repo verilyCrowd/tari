@@ -26,11 +26,10 @@ use super::{
     types::ConnectionDirection,
 };
 use crate::{
-    multiplexing::{IncomingSubstreams, Yamux},
-    peer_manager::NodeId,
+    multiplexing::{Control, IncomingSubstreams, Substream, SubstreamCounter, Yamux},
+    peer_manager::{NodeId, PeerFeatures},
     protocol::{ProtocolId, ProtocolNegotiation},
     runtime,
-    types::CommsSubstream,
 };
 use futures::{
     channel::{mpsc, oneshot},
@@ -42,10 +41,8 @@ use log::*;
 use multiaddr::Multiaddr;
 use std::{
     fmt,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
+    sync::atomic::{AtomicUsize, Ordering},
+    time::{Duration, Instant},
 };
 use tari_shutdown::Shutdown;
 
@@ -59,6 +56,7 @@ pub fn create(
     connection: Yamux,
     peer_addr: Multiaddr,
     peer_node_id: NodeId,
+    peer_features: PeerFeatures,
     direction: ConnectionDirection,
     event_notifier: mpsc::Sender<ConnectionManagerEvent>,
     our_supported_protocols: Vec<ProtocolId>,
@@ -71,7 +69,16 @@ pub fn create(
     );
     let (peer_tx, peer_rx) = mpsc::channel(PEER_REQUEST_BUFFER_SIZE);
     let id = ID_COUNTER.fetch_add(1, Ordering::Relaxed); // Monotonic
-    let peer_conn = PeerConnection::new(id, peer_tx, peer_node_id.clone(), peer_addr, direction);
+    let substream_counter = connection.substream_counter();
+    let peer_conn = PeerConnection::new(
+        id,
+        peer_tx,
+        peer_node_id.clone(),
+        peer_features,
+        peer_addr,
+        direction,
+        substream_counter,
+    );
     let peer_actor = PeerConnectionActor::new(
         id,
         peer_node_id,
@@ -91,7 +98,7 @@ pub enum PeerConnectionRequest {
     /// Open a new substream and negotiate the given protocol
     OpenSubstream(
         ProtocolId,
-        oneshot::Sender<Result<NegotiatedSubstream<CommsSubstream>, PeerConnectionError>>,
+        oneshot::Sender<Result<NegotiatedSubstream<Substream>, PeerConnectionError>>,
     ),
     /// Disconnect all substreams and close the transport connection
     Disconnect(bool, oneshot::Sender<()>),
@@ -103,10 +110,13 @@ pub type ConnId = usize;
 #[derive(Clone, Debug)]
 pub struct PeerConnection {
     id: ConnId,
-    peer_node_id: Arc<NodeId>,
+    peer_node_id: NodeId,
+    peer_features: PeerFeatures,
     request_tx: mpsc::Sender<PeerConnectionRequest>,
     address: Multiaddr,
     direction: ConnectionDirection,
+    started_at: Instant,
+    substream_counter: SubstreamCounter,
 }
 
 impl PeerConnection {
@@ -114,16 +124,21 @@ impl PeerConnection {
         id: ConnId,
         request_tx: mpsc::Sender<PeerConnectionRequest>,
         peer_node_id: NodeId,
+        peer_features: PeerFeatures,
         address: Multiaddr,
         direction: ConnectionDirection,
+        substream_counter: SubstreamCounter,
     ) -> Self
     {
         Self {
             id,
             request_tx,
-            peer_node_id: Arc::new(peer_node_id),
+            peer_node_id,
+            peer_features,
             address,
             direction,
+            started_at: Instant::now(),
+            substream_counter,
         }
     }
 
@@ -131,8 +146,16 @@ impl PeerConnection {
         &self.peer_node_id
     }
 
+    pub fn peer_features(&self) -> PeerFeatures {
+        self.peer_features
+    }
+
     pub fn direction(&self) -> ConnectionDirection {
         self.direction
+    }
+
+    pub fn address(&self) -> &Multiaddr {
+        &self.address
     }
 
     pub fn id(&self) -> ConnId {
@@ -143,14 +166,18 @@ impl PeerConnection {
         !self.request_tx.is_closed()
     }
 
-    pub fn reference_count(&self) -> usize {
-        Arc::strong_count(&self.peer_node_id)
+    pub fn age(&self) -> Duration {
+        self.started_at.elapsed()
+    }
+
+    pub fn substream_count(&self) -> usize {
+        self.substream_counter.get()
     }
 
     pub async fn open_substream(
         &mut self,
         protocol_id: &ProtocolId,
-    ) -> Result<NegotiatedSubstream<CommsSubstream>, PeerConnectionError>
+    ) -> Result<NegotiatedSubstream<Substream>, PeerConnectionError>
     {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.request_tx
@@ -161,6 +188,8 @@ impl PeerConnection {
             .map_err(|_| PeerConnectionError::InternalReplyCancelled)?
     }
 
+    /// Immediately disconnects the peer connection. This can only fail if the peer connection worker
+    /// is shut down (and the peer is already disconnected)
     pub async fn disconnect(&mut self) -> Result<(), PeerConnectionError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.request_tx
@@ -186,11 +215,12 @@ impl fmt::Display for PeerConnection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         write!(
             f,
-            "Id = {}, Node ID = {}, Direction = {}, Peer Address = {}",
+            "Id = {}, Node ID = {}, Direction = {}, Peer Address = {}, Features = {:?}",
             self.id,
             self.peer_node_id.short_str(),
-            self.direction.to_string(),
-            self.address.to_string()
+            self.direction,
+            self.address,
+            self.peer_features,
         )
     }
 }
@@ -203,7 +233,7 @@ pub struct PeerConnectionActor {
     direction: ConnectionDirection,
     incoming_substreams: Fuse<IncomingSubstreams>,
     substream_shutdown: Option<Shutdown>,
-    control: yamux::Control,
+    control: Control,
     event_notifier: mpsc::Sender<ConnectionManagerEvent>,
     supported_protocols: Vec<ProtocolId>,
     shutdown: bool,
@@ -292,7 +322,7 @@ impl PeerConnectionActor {
         }
     }
 
-    async fn handle_incoming_substream(&mut self, mut stream: yamux::Stream) -> Result<(), PeerConnectionError> {
+    async fn handle_incoming_substream(&mut self, mut stream: Substream) -> Result<(), PeerConnectionError> {
         let selected_protocol = ProtocolNegotiation::new(&mut stream)
             .negotiate_protocol_inbound(&self.supported_protocols)
             .await?;
@@ -310,7 +340,7 @@ impl PeerConnectionActor {
     async fn open_negotiated_protocol_stream(
         &mut self,
         protocol: ProtocolId,
-    ) -> Result<NegotiatedSubstream<CommsSubstream>, PeerConnectionError>
+    ) -> Result<NegotiatedSubstream<Substream>, PeerConnectionError>
     {
         debug!(
             target: LOG_TARGET,
@@ -344,7 +374,7 @@ impl PeerConnectionActor {
     ///
     /// # Arguments
     ///
-    /// silent - true to supress the PeerDisconnected event, false to publish the event
+    /// silent - true to suppress the PeerDisconnected event, false to publish the event
     async fn disconnect(&mut self, silent: bool) {
         if let Err(err) = self.control.close().await {
             warn!(
@@ -355,7 +385,7 @@ impl PeerConnectionActor {
                 err
             );
         }
-        trace!(target: LOG_TARGET, "Connection closed");
+        debug!(target: LOG_TARGET, "Connection closed");
 
         self.shutdown = true;
         // Shut down the incoming substream task
@@ -402,36 +432,5 @@ impl<TSubstream> fmt::Debug for NegotiatedSubstream<TSubstream> {
             .field("protocol", &format!("{:?}", self.protocol))
             .field("stream", &"...".to_string())
             .finish()
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    #[test]
-    fn reference_count() {
-        let conn = PeerConnection::new(
-            1,
-            mpsc::channel(0).0,
-            Default::default(),
-            Multiaddr::empty(),
-            ConnectionDirection::Outbound,
-        );
-
-        assert_eq!(conn.reference_count(), 1);
-        let clone = conn.clone();
-
-        assert_eq!(conn.reference_count(), 2);
-        assert_eq!(clone.reference_count(), 2);
-
-        let clone2 = conn.clone();
-        assert_eq!(conn.reference_count(), 3);
-        assert_eq!(clone.reference_count(), 3);
-        assert_eq!(clone2.reference_count(), 3);
-
-        drop(clone2);
-        drop(clone);
-        assert_eq!(conn.reference_count(), 1);
     }
 }

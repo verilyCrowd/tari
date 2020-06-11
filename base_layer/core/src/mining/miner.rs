@@ -22,20 +22,20 @@
 
 use crate::{
     base_node::{
-        comms_interface::{BlockEvent, LocalNodeCommsInterface},
+        comms_interface::{Broadcast, CommsInterfaceError, LocalNodeCommsInterface},
         states::{StateEvent, SyncStatus},
     },
     blocks::{Block, BlockHeader, NewBlockTemplate},
-    chain_storage::BlockAddResult,
     consensus::ConsensusManager,
+    mempool::MempoolStateEvent,
     mining::{blake_miner::CpuBlakePow, error::MinerError, CoinbaseBuilder},
-    proof_of_work::{Difficulty, PowAlgorithm},
+    proof_of_work::PowAlgorithm,
     transactions::{
         transaction::UnblindedOutput,
         types::{CryptoFactories, PrivateKey},
     },
 };
-use core::sync::atomic::AtomicBool;
+use core::sync::atomic::{AtomicBool, AtomicU64};
 use futures::{
     channel::{
         mpsc,
@@ -60,9 +60,11 @@ pub struct Miner {
     consensus: ConsensusManager,
     node_interface: LocalNodeCommsInterface,
     utxo_sender: Sender<UnblindedOutput>,
-    state_change_event_rx: Option<Subscriber<StateEvent>>,
+    node_state_event_rx: Option<Subscriber<StateEvent>>,
+    mempool_state_event_rx: Option<Subscriber<MempoolStateEvent>>,
     threads: usize,
     enabled: Arc<AtomicBool>,
+    hashrate: Arc<AtomicU64>,
 }
 
 impl Miner {
@@ -81,9 +83,11 @@ impl Miner {
             stop_mining_flag: Arc::new(AtomicBool::new(false)),
             node_interface: node_interface.clone(),
             utxo_sender,
-            state_change_event_rx: None,
+            node_state_event_rx: None,
+            mempool_state_event_rx: None,
             threads,
             enabled: Arc::new(AtomicBool::new(false)),
+            hashrate: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -100,13 +104,22 @@ impl Miner {
     /// The state machine will publish state changes here. The miner is only interested to know when the state machine
     /// transitions to listing state. This means that the miner has moved from some disconnected state to up to date
     /// and the miner can ask for a new block to mine upon.
-    pub fn subscribe_to_state_change(&mut self, state_change_event_rx: Subscriber<StateEvent>) {
-        self.state_change_event_rx = Some(state_change_event_rx);
+    pub fn subscribe_to_node_state_events(&mut self, state_change_event_rx: Subscriber<StateEvent>) {
+        self.node_state_event_rx = Some(state_change_event_rx);
+    }
+
+    /// This provides a tari_broadcast_channel to the miner so that it can subscribe to the mempool.
+    pub fn subscribe_to_mempool_state_events(&mut self, state_event_rx: Subscriber<MempoolStateEvent>) {
+        self.mempool_state_event_rx = Some(state_event_rx);
     }
 
     /// This function returns a arc copy of the atomic bool to start and shutdown the miner.
     pub fn enable_mining_flag(&self) -> Arc<AtomicBool> {
         self.enabled.clone()
+    }
+
+    pub fn get_hashrate_u64(&self) -> Arc<AtomicU64> {
+        self.hashrate.clone()
     }
 
     /// Mine blocks asynchronously.
@@ -124,7 +137,7 @@ impl Miner {
     ///     * or the loop is interrupted because a new block was found in the interim, or the miner is stopped
     async fn mining(mut self) -> Result<Miner, MinerError> {
         // Lets make sure its set to mine
-        debug!(target: LOG_TARGET, "Miner asking for new candidate block to mine.");
+        info!(target: LOG_TARGET, "Miner asking for new candidate block to mine.");
         let block_template = self.get_block_template().await;
         if block_template.is_err() {
             error!(
@@ -150,15 +163,15 @@ impl Miner {
         };
         let mut block = block.unwrap();
         debug!(target: LOG_TARGET, "Miner got new block to mine.");
-        let difficulty = self.get_req_difficulty().await?;
         let (tx, mut rx): (Sender<Option<BlockHeader>>, Receiver<Option<BlockHeader>>) = mpsc::channel(self.threads);
         for _ in 0..self.threads {
             let stop_mining_flag = self.stop_mining_flag.clone();
             let header = block.header.clone();
+            let thread_hash_rate = self.hashrate.clone();
             let mut tx_channel = tx.clone();
             trace!("spawning mining thread");
             spawn_blocking(move || {
-                let result = CpuBlakePow::mine(difficulty, header, stop_mining_flag);
+                let result = CpuBlakePow::mine(header, stop_mining_flag, thread_hash_rate);
                 // send back what the miner found, None will be sent if the miner did not find a nonce
                 if let Err(e) = tx_channel.try_send(result) {
                     warn!(target: LOG_TARGET, "Could not return mining result: {}", e);
@@ -208,15 +221,19 @@ impl Miner {
     pub async fn mine(mut self) {
         // This flag is used to stop the mining;
         let stop_mining_flag = self.stop_mining_flag.clone();
-        let block_event = self.node_interface.clone().get_block_event_stream_fused();
+        let mempool_state_event = self
+            .mempool_state_event_rx
+            .take()
+            .expect("Miner does not have access to the mempool state event stream")
+            .fuse();
         let state_event = self
-            .state_change_event_rx
+            .node_state_event_rx
             .take()
             .expect("Miner does not have access to state event stream")
             .fuse();
         let mut kill_signal = self.kill_signal.clone();
 
-        pin_mut!(block_event);
+        pin_mut!(mempool_state_event);
         pin_mut!(state_event);
         // Start mining immediately in case we're the only node on the network and we never receive a BlockSync event
         let mut start_mining = true;
@@ -235,20 +252,14 @@ impl Miner {
             let mut wait_for_miner = false;
             while !wait_for_miner {
                 futures::select! {
-                msg = block_event.select_next_some() => {
+                msg = mempool_state_event.select_next_some() => {
                     match *msg {
-                        BlockEvent::Verified((_, ref result)) => {
-                            //Miner does not care if the chain reorg'ed or just added a new block. Both cases means a new chain tip, so it needs to restart.
-                        match *result {
-                            BlockAddResult::Ok | BlockAddResult::ChainReorg(_) => {
+                        MempoolStateEvent::Updated => {
                             stop_mining_flag.store(true, Ordering::Relaxed);
                             start_mining = true;
                             wait_for_miner = true;
                         },
-                        _ => {}
-                    }
-                    },
-                    _ => (),
+                        _ => (),
                     }
                 },
                 event = state_event.select_next_some() => {
@@ -286,7 +297,7 @@ impl Miner {
         trace!(target: LOG_TARGET, "Requesting new block template from node.");
         Ok(self
             .node_interface
-            .get_new_block_template()
+            .get_new_block_template(PowAlgorithm::Blake)
             .await
             .or_else(|e| {
                 error!(
@@ -313,24 +324,6 @@ impl Miner {
                     target: LOG_TARGET,
                     "Could not get a new block from the base node. {:?}.", e
                 );
-                Err(e)
-            })
-            .map_err(|e| MinerError::CommunicationError(e.to_string()))?)
-    }
-
-    /// function to get the required difficulty
-    pub async fn get_req_difficulty(&mut self) -> Result<Difficulty, MinerError> {
-        trace!(target: LOG_TARGET, "Requesting target difficulty from node");
-        Ok(self
-            .node_interface
-            .get_target_difficulty(PowAlgorithm::Blake)
-            .await
-            .or_else(|e| {
-                error!(
-                    target: LOG_TARGET,
-                    "Could not get the required difficulty from the base node. {:?}.", e
-                );
-
                 Err(e)
             })
             .map_err(|e| MinerError::CommunicationError(e.to_string()))?)
@@ -365,14 +358,20 @@ impl Miner {
     ///  function to send a block
     async fn send_block(&mut self, block: Block) -> Result<(), MinerError> {
         info!(target: LOG_TARGET, "Mined a block: {}", block);
-        self.node_interface
-            .submit_block(block)
-            .await
-            .or_else(|e| {
+        match self.node_interface.submit_block(block, Broadcast::from(true)).await {
+            Ok(_) => {
+                trace!("Miner successfully submitted block");
+                Ok(())
+            },
+            Err(CommsInterfaceError::ChainStorageError(e)) => {
+                error!(target: LOG_TARGET, "Miner submitted invalid block. {:?}.", e);
+                // Miner does not care about an invalid block and wants the next block so we return an ok
+                Ok(())
+            },
+            Err(e) => {
                 error!(target: LOG_TARGET, "Could not send block to base node. {:?}.", e);
-                Err(e)
-            })
-            .map_err(|e| MinerError::CommunicationError(e.to_string()))?;
-        Ok(())
+                Err(MinerError::CommunicationError(e.to_string()))
+            },
+        }
     }
 }

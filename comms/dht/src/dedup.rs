@@ -20,23 +20,19 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use crate::{actor::DhtRequester, inbound::DhtInboundMessage, outbound::message::DhtOutboundMessage};
+use crate::{actor::DhtRequester, inbound::DhtInboundMessage};
 use digest::Input;
 use futures::{task::Context, Future};
 use log::*;
 use std::task::Poll;
 use tari_comms::{pipeline::PipelineError, types::Challenge};
-use tari_crypto::tari_utilities::hex::Hex;
+use tari_utilities::hex::Hex;
 use tower::{layer::Layer, Service, ServiceExt};
 
 const LOG_TARGET: &str = "comms::dht::dedup";
 
 fn hash_inbound_message(message: &DhtInboundMessage) -> Vec<u8> {
     Challenge::new().chain(&message.body).result().to_vec()
-}
-
-fn hash_outbound_message(message: &DhtOutboundMessage) -> Vec<u8> {
-    Challenge::new().chain(&message.body.to_vec()).result().to_vec()
 }
 
 /// # DHT Deduplication middleware
@@ -77,69 +73,32 @@ where S: Service<DhtInboundMessage, Response = (), Error = PipelineError> + Clon
             let hash = hash_inbound_message(&message);
             trace!(
                 target: LOG_TARGET,
-                "Inserting message hash {} for message {}",
+                "Inserting message hash {} for message {} (Trace: {})",
                 hash.to_hex(),
-                message.tag
+                message.tag,
+                message.dht_header.message_tag
             );
             if dht_requester
                 .insert_message_hash(hash)
                 .await
                 .map_err(PipelineError::from_debug)?
             {
-                info!(
+                trace!(
                     target: LOG_TARGET,
-                    "Received duplicate message {} from peer '{}'. Message discarded.",
+                    "Received duplicate message {} from peer '{}' (Trace: {}). Message discarded.",
                     message.tag,
                     message.source_peer.node_id.short_str(),
+                    message.dht_header.message_tag,
                 );
                 return Ok(());
             }
 
-            debug!(target: LOG_TARGET, "Passing message {} onto next service", message.tag);
-            next_service.oneshot(message).await
-        }
-    }
-}
-
-impl<S> Service<DhtOutboundMessage> for DedupMiddleware<S>
-where S: Service<DhtOutboundMessage, Response = (), Error = PipelineError> + Clone
-{
-    type Error = PipelineError;
-    type Response = ();
-
-    type Future = impl Future<Output = Result<Self::Response, Self::Error>>;
-
-    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, message: DhtOutboundMessage) -> Self::Future {
-        let next_service = self.next_service.clone();
-        let mut dht_requester = self.dht_requester.clone();
-        async move {
-            if message.is_broadcast {
-                let hash = hash_outbound_message(&message);
-                debug!(
-                    target: LOG_TARGET,
-                    "Dedup added message hash {} to cache for message {}",
-                    hash.to_hex(),
-                    message.tag
-                );
-                if dht_requester
-                    .insert_message_hash(hash)
-                    .await
-                    .map_err(PipelineError::from_debug)?
-                {
-                    info!(
-                        target: LOG_TARGET,
-                        "Outgoing message is already in the cache ({}, next peer = {})",
-                        message.tag,
-                        message.destination_peer.node_id.short_str()
-                    );
-                }
-            }
-
-            trace!(target: LOG_TARGET, "Passing message onto next service");
+            trace!(
+                target: LOG_TARGET,
+                "Passing message {} onto next service (Trace: {})",
+                message.tag,
+                message.dht_header.message_tag
+            );
             next_service.oneshot(message).await
         }
     }
@@ -168,14 +127,7 @@ mod test {
     use super::*;
     use crate::{
         envelope::DhtMessageFlags,
-        test_utils::{
-            create_dht_actor_mock,
-            create_outbound_message,
-            make_dht_inbound_message,
-            make_node_identity,
-            service_spy,
-            DhtMockState,
-        },
+        test_utils::{create_dht_actor_mock, make_dht_inbound_message, make_node_identity, service_spy},
     };
     use tari_test_utils::panic_context;
     use tokio::runtime::Runtime;
@@ -185,10 +137,9 @@ mod test {
         let mut rt = Runtime::new().unwrap();
         let spy = service_spy();
 
-        let (dht_requester, mut mock) = create_dht_actor_mock(1);
-        let mock_state = DhtMockState::new();
+        let (dht_requester, mock) = create_dht_actor_mock(1);
+        let mock_state = mock.get_shared_state();
         mock_state.set_signature_cache_insert(false);
-        mock.set_shared_state(mock_state.clone());
         rt.spawn(mock.run());
 
         let mut dedup = DedupLayer::new(dht_requester).layer(spy.to_service::<PipelineError>());
@@ -216,17 +167,13 @@ mod test {
         let node_identity = make_node_identity();
         let msg = make_dht_inbound_message(&node_identity, TEST_MSG.to_vec(), DhtMessageFlags::empty(), false);
         let hash1 = hash_inbound_message(&msg);
-        let msg = create_outbound_message(&TEST_MSG);
-        let hash_out1 = hash_outbound_message(&msg);
 
         let node_identity = make_node_identity();
         let msg = make_dht_inbound_message(&node_identity, TEST_MSG.to_vec(), DhtMessageFlags::empty(), false);
         let hash2 = hash_inbound_message(&msg);
-        let msg = create_outbound_message(&TEST_MSG);
-        let hash_out2 = hash_outbound_message(&msg);
 
         assert_eq!(hash1, hash2);
-        let subjects = &[hash1, hash_out1, hash2, hash_out2];
+        let subjects = &[hash1, hash2];
         assert!(subjects.into_iter().all(|h| h.to_hex() == EXPECTED_HASH));
     }
 }

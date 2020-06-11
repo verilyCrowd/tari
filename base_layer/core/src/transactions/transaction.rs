@@ -45,6 +45,7 @@ use digest::Input;
 use serde::{Deserialize, Serialize};
 use std::{
     cmp::{max, min, Ordering},
+    fmt,
     fmt::{Display, Formatter},
     hash::{Hash, Hasher},
     ops::Add,
@@ -130,6 +131,16 @@ impl PartialOrd for OutputFeatures {
 impl Ord for OutputFeatures {
     fn cmp(&self, other: &Self) -> Ordering {
         self.maturity.cmp(&other.maturity)
+    }
+}
+
+impl Display for OutputFeatures {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "OutputFeatures: Flags = {:?}, Maturity = {}",
+            self.flags, self.maturity
+        )
     }
 }
 
@@ -348,7 +359,7 @@ impl TransactionOutput {
 /// We can exclude the range proof from this hash. The rationale for this is:
 /// a) It is a significant performance boost, since the RP is the biggest part of an output
 /// b) Range proofs are committed to elsewhere and so we'd be hashing them twice (and as mentioned, this is slow)
-/// c) TransactionInputs will now have the same hash as UTXOs, which makes locating STXOs easier when doing re-orgs
+/// c) TransactionInputs will now have the same hash as UTXOs, which makes locating STXOs easier when doing reorgs
 impl Hashable for TransactionOutput {
     fn hash(&self) -> Vec<u8> {
         HashDigest::new()

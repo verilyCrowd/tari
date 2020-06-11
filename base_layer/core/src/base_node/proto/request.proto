@@ -1,6 +1,7 @@
 syntax = "proto3";
 
 import "block.proto";
+import "mmr_tree.proto";
 
 package tari.base_node;
 
@@ -23,13 +24,17 @@ message BaseNodeServiceRequest {
         // Indicates a FetchBlocksWithHashes request.
         HashOutputs fetch_blocks_with_hashes = 8;
         // Indicates a GetNewBlockTemplate request.
-        bool get_new_block_template = 9;
+        uint64 get_new_block_template = 9;
         // Indicates a GetNewBlock request.
         tari.core.NewBlockTemplate get_new_block = 10;
         // Indicates a GetTargetDifficulty request.
         uint64 get_target_difficulty = 11;
         // Get headers in best chain following any headers in this list
         FetchHeadersAfter fetch_headers_after = 12;
+        // Indicates a FetchMmrNodeCount request.
+        FetchMmrNodeCount fetch_mmr_node_count = 13;
+        // Indicates a FetchMmrNodes request.
+        FetchMmrNodes fetch_mmr_nodes = 14;
     }
 }
 
@@ -44,4 +49,15 @@ message HashOutputs {
 message FetchHeadersAfter {
     repeated bytes hashes = 1;
     bytes stopping_hash = 2;
+}
+
+message FetchMmrNodeCount {
+    MmrTree tree = 1;
+    uint64 height = 2;
+}
+
+message FetchMmrNodes{
+    MmrTree tree = 1;
+    uint32 pos = 2;
+    uint32 count = 3;
 }

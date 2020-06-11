@@ -33,7 +33,7 @@ use crate::{
     multiaddr::Multiaddr,
     multiplexing::Yamux,
     noise::{NoiseConfig, NoiseSocket},
-    peer_manager::{NodeId, NodeIdentity, Peer, PeerManager},
+    peer_manager::{NodeId, NodeIdentity, Peer, PeerFeatures, PeerManager},
     protocol::ProtocolId,
     transports::Transport,
     types::CommsPublicKey,
@@ -217,12 +217,7 @@ where
             self.reply_to_pending_requests(&node_id, dial_result.clone());
         }
 
-        log_if_error_fmt!(
-            target: LOG_TARGET,
-            reply_tx.send(dial_result),
-            "Failed to send dial result reply for peer '{}'",
-            peer_id_short_str
-        );
+        let _ = reply_tx.send(dial_result);
     }
 
     pub async fn notify_connection_manager(&mut self, event: ConnectionManagerEvent) {
@@ -309,13 +304,17 @@ where
                         supported_protocols,
                         allow_test_addresses,
                     );
+
                     futures::pin_mut!(upgrade_fut);
                     let either = future::select(upgrade_fut, cancel_signal).await;
 
                     match either {
                         Either::Left((result, _)) => (dial_state, result),
-                        // Dial cancel was triggered
-                        Either::Right(_) => (dial_state, Err(ConnectionManagerError::DialCancelled)),
+                        //     Dial cancel was triggered
+                        Either::Right(_) => {
+                            debug!(target: LOG_TARGET, "Dial was cancelled");
+                            (dial_state, Err(ConnectionManagerError::DialCancelled))
+                        },
                     }
                 },
                 Err(err) => (dial_state, Err(err)),
@@ -359,11 +358,11 @@ where
             .await
             .map_err(|err| ConnectionManagerError::YamuxUpgradeFailure(err.to_string()))?;
 
-        trace!(
+        debug!(
             target: LOG_TARGET,
-            "Starting peer identity exchange for peer with public key '{}'",
-            authenticated_public_key
+            "Starting peer identity exchange for peer with public key '{}'", authenticated_public_key
         );
+
         let peer_identity = common::perform_identity_exchange(
             &mut muxer,
             &node_identity,
@@ -372,15 +371,21 @@ where
         )
         .await?;
 
-        debug!(
+        let features = PeerFeatures::from_bits_truncate(peer_identity.features);
+        trace!(
             target: LOG_TARGET,
-            "Peer identity exchange succeeded on Outbound connection for peer '{}'",
-            peer_identity.node_id.to_hex()
+            "Peer identity exchange succeeded on Outbound connection for peer '{}' (Features = {:?})",
+            peer_identity.node_id.to_hex(),
+            features
         );
         trace!(target: LOG_TARGET, "{:?}", peer_identity);
 
+        // Check if we know the peer and if it is banned
+        let known_peer = common::find_unbanned_peer(&peer_manager, &authenticated_public_key).await?;
+
         let peer_node_id = common::validate_and_add_peer_from_peer_identity(
             &peer_manager,
+            known_peer,
             authenticated_public_key,
             peer_identity,
             allow_test_addresses,
@@ -398,6 +403,7 @@ where
             muxer,
             dialed_addr,
             peer_node_id,
+            features,
             CONNECTION_DIRECTION,
             conn_man_notifier,
             our_supported_protocols,
@@ -441,7 +447,7 @@ where
                         // Inflight dial was cancelled
                         (state, Err(ConnectionManagerError::DialCancelled)) => break (state, Err(ConnectionManagerError::DialCancelled)),
                         (mut state, Err(err)) => {
-                            if state.num_attempts() > max_attempts {
+                            if state.num_attempts() >= max_attempts {
                                 break (state, Err(ConnectionManagerError::ConnectFailedMaximumAttemptsReached));
                             }
 

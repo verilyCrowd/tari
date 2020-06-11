@@ -21,35 +21,35 @@
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 use bitflags::bitflags;
-use derive_error::Error;
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::{
     convert::{TryFrom, TryInto},
     fmt,
     fmt::Display,
 };
-use tari_comms::{peer_manager::NodeId, types::CommsPublicKey};
-use tari_crypto::tari_utilities::{ByteArray, ByteArrayError};
+use tari_comms::{message::MessageTag, peer_manager::NodeId, types::CommsPublicKey};
+use tari_utilities::{ByteArray, ByteArrayError};
+use thiserror::Error;
 
 // Re-export applicable protos
 pub use crate::proto::envelope::{dht_header::Destination, DhtEnvelope, DhtHeader, DhtMessageType, Network};
-use bytes::Bytes;
 
 #[derive(Debug, Error)]
 pub enum DhtMessageError {
-    /// Invalid node destination
+    #[error("Invalid node destination")]
     InvalidDestination,
-    /// Invalid origin public key
+    #[error("Invalid origin public key")]
     InvalidOrigin,
-    /// Invalid or unrecognised DHT message type
+    #[error("Invalid or unrecognised DHT message type")]
     InvalidMessageType,
-    /// Invalid or unrecognised network type
+    #[error("Invalid or unrecognised network type")]
     InvalidNetwork,
-    /// Invalid or unrecognised DHT message flags
+    #[error("Invalid or unrecognised DHT message flags")]
     InvalidMessageFlags,
-    /// Invalid ephemeral public key
+    #[error("Invalid ephemeral public key")]
     InvalidEphemeralPublicKey,
-    /// Header was omitted from the message
+    #[error("Header was omitted from the message")]
     HeaderOmitted,
 }
 
@@ -118,6 +118,7 @@ pub struct DhtMessageHeader {
     pub message_type: DhtMessageType,
     pub network: Network,
     pub flags: DhtMessageFlags,
+    pub message_tag: MessageTag,
 }
 
 impl DhtMessageHeader {
@@ -134,8 +135,8 @@ impl Display for DhtMessageHeader {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         write!(
             f,
-            "DhtMessageHeader (Dest:{}, Type:{:?}, Network:{:?}, Flags:{:?})",
-            self.destination, self.message_type, self.network, self.flags
+            "DhtMessageHeader (Dest:{}, Type:{:?}, Network:{:?}, Flags:{:?}, Trace:{})",
+            self.destination, self.message_type, self.network, self.flags, self.message_tag
         )
     }
 }
@@ -169,6 +170,7 @@ impl TryFrom<DhtHeader> for DhtMessageHeader {
                 .ok_or_else(|| DhtMessageError::InvalidMessageType)?,
             network: Network::from_i32(header.network).ok_or_else(|| DhtMessageError::InvalidNetwork)?,
             flags: DhtMessageFlags::from_bits(header.flags).ok_or_else(|| DhtMessageError::InvalidMessageFlags)?,
+            message_tag: MessageTag::from(header.message_tag),
         })
     }
 }
@@ -198,6 +200,7 @@ impl From<DhtMessageHeader> for DhtHeader {
             message_type: header.message_type as i32,
             network: header.network as i32,
             flags: header.flags.bits(),
+            message_tag: header.message_tag.as_value(),
         }
     }
 }

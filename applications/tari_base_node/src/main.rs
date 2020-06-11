@@ -46,7 +46,7 @@
 /// ```
 ///
 /// For the first run
-/// ```cargo run tari_base_node -- --create_id```
+/// ```cargo run tari_base_node -- --create-id```
 /// 
 /// Subsequent runs
 /// ```cargo run tari_base_node```
@@ -73,12 +73,16 @@
 /// `quit` - Exits the Base Node
 /// `exit` - Same as quit
 
+/// Used to display tabulated data
+#[macro_use]
+mod table;
+
 /// Utilities and helpers for building the base node instance
 mod builder;
 /// The command line interface definition and configuration
 mod cli;
 /// Application-specific constants
-mod consts;
+mod grpc;
 /// Miner lib Todo hide behind feature flag
 mod miner;
 /// Parser module used to control user commands
@@ -89,12 +93,13 @@ use crate::builder::{create_new_base_node_identity, load_identity};
 use log::*;
 use parser::Parser;
 use rustyline::{config::OutputStreamType, error::ReadlineError, CompletionType, Config, EditMode, Editor};
-use std::{path::PathBuf, sync::Arc};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use structopt::StructOpt;
-use tari_common::GlobalConfig;
+use tari_common::{ConfigBootstrap, GlobalConfig};
 use tari_comms::{multiaddr::Multiaddr, peer_manager::PeerFeatures, NodeIdentity};
 use tari_shutdown::Shutdown;
 use tokio::runtime::Runtime;
+use tonic::transport::Server;
 
 pub const LOG_TARGET: &str = "base_node::app";
 
@@ -122,16 +127,16 @@ fn main() {
 /// Sets up the base node and runs the cli_loop
 fn main_inner() -> Result<(), ExitCodes> {
     // Parse and validate command-line arguments
-    let mut arguments = cli::Arguments::from_args();
+    let mut bootstrap = ConfigBootstrap::from_args();
 
-    // check and initialize configuration files
-    arguments.bootstrap.init_dirs()?;
-
-    // Initialise the logger
-    arguments.bootstrap.initialize_logging()?;
+    // Check and initialize configuration files
+    bootstrap.init_dirs()?;
 
     // Load and apply configuration file
-    let cfg = arguments.bootstrap.load_configuration()?;
+    let cfg = bootstrap.load_configuration()?;
+
+    // Initialise the logger
+    bootstrap.initialize_logging()?;
 
     // Populate the configuration struct
     let node_config = GlobalConfig::convert_from(cfg).map_err(|err| {
@@ -139,7 +144,7 @@ fn main_inner() -> Result<(), ExitCodes> {
         ExitCodes::ConfigError
     })?;
 
-    trace!(target: LOG_TARGET, "Using configuration: {:?}", node_config);
+    debug!(target: LOG_TARGET, "Using configuration: {:?}", node_config);
 
     // Set up the Tokio runtime
     let mut rt = setup_runtime(&node_config).map_err(|err| {
@@ -151,7 +156,7 @@ fn main_inner() -> Result<(), ExitCodes> {
     let wallet_identity = setup_node_identity(
         &node_config.wallet_identity_file,
         &node_config.public_address,
-        arguments.create_id ||
+        bootstrap.create_id ||
             // If the base node identity exists, we want to be sure that the wallet identity exists
             node_config.identity_file.exists(),
         PeerFeatures::COMMUNICATION_CLIENT,
@@ -159,9 +164,24 @@ fn main_inner() -> Result<(), ExitCodes> {
     let node_identity = setup_node_identity(
         &node_config.identity_file,
         &node_config.public_address,
-        arguments.create_id,
+        bootstrap.create_id,
         PeerFeatures::COMMUNICATION_NODE,
     )?;
+
+    // Exit if create_id or init arguments were run
+    if bootstrap.create_id {
+        info!(
+            target: LOG_TARGET,
+            "Node ID created at '{}'. Done.",
+            node_config.identity_file.to_string_lossy()
+        );
+        return Ok(());
+    }
+
+    if bootstrap.init {
+        info!(target: LOG_TARGET, "Default configuration created. Done.");
+        return Ok(());
+    }
 
     // Build, node, build!
     let shutdown = Shutdown::new();
@@ -177,26 +197,16 @@ fn main_inner() -> Result<(), ExitCodes> {
             ExitCodes::UnknownError
         })?;
 
-    // Exit if create_id or init arguments were run
-    if arguments.create_id {
-        info!(
-            target: LOG_TARGET,
-            "Node ID created at '{}'. Done.",
-            node_config.identity_file.to_string_lossy()
-        );
-        return Ok(());
-    }
-
-    if arguments.bootstrap.init {
-        info!(target: LOG_TARGET, "Default configuration created. Done.");
-        return Ok(());
-    }
-
     // Run, node, run!
-    let parser = Parser::new(rt.handle().clone(), &ctx);
+    let parser = Parser::new(rt.handle().clone(), &ctx, &node_config);
 
     cli::print_banner(parser.get_commands(), 3);
+    if node_config.grpc_enabled {
+        let grpc =
+            crate::grpc::server::BaseNodeGrpcServer::new(rt.handle().clone(), ctx.local_node(), node_config.clone());
 
+        rt.spawn(run_grpc(grpc, node_config.grpc_address));
+    }
     let base_node_handle = rt.spawn(ctx.run(rt.handle().clone()));
 
     info!(
@@ -215,6 +225,19 @@ fn main_inner() -> Result<(), ExitCodes> {
     Ok(())
 }
 
+/// Runs the gRPC server
+async fn run_grpc(grpc: crate::grpc::server::BaseNodeGrpcServer, grpc_address: SocketAddr) -> Result<(), String> {
+    info!(target: LOG_TARGET, "Starting GRPC on {}", grpc_address);
+
+    Server::builder()
+        .add_service(crate::grpc::server::base_node_grpc::base_node_server::BaseNodeServer::new(grpc))
+        .serve(grpc_address)
+        .await
+        .map_err(|e| format!("GRPC server returned error:{}", e))?;
+    info!(target: LOG_TARGET, "Stopping GRPC");
+    Ok(())
+}
+
 /// Sets up the tokio runtime based on the configuration
 /// ## Parameters
 /// `config` - The configuration  of the base node
@@ -226,7 +249,7 @@ fn setup_runtime(config: &GlobalConfig) -> Result<Runtime, String> {
     let num_blocking_threads = config.blocking_threads;
     let num_mining_threads = config.num_mining_threads;
 
-    debug!(
+    info!(
         target: LOG_TARGET,
         "Configuring the node to run on {} core threads, {} blocking worker threads and {} mining threads.",
         num_core_threads,
@@ -290,7 +313,7 @@ fn cli_loop(parser: Parser, mut shutdown: Shutdown) {
     }
 }
 
-/// Loads the node identity, or creates a new one if the --create_id flag was specified
+/// Loads the node identity, or creates a new one if the --create-id flag was specified
 /// ## Parameters
 /// `identity_file` - Reference to file path
 /// `public_address` - Network address of the base node
@@ -313,7 +336,7 @@ fn setup_node_identity(
                 error!(
                     target: LOG_TARGET,
                     "Node identity information not found. {}. You can update the configuration file to point to a \
-                     valid node identity file, or re-run the node with the --create_id flag to create a new identity.",
+                     valid node identity file, or re-run the node with the --create-id flag to create a new identity.",
                     e
                 );
                 return Err(ExitCodes::ConfigError);

@@ -36,7 +36,6 @@ use crate::{
             StoredMessagesResponse,
         },
     },
-    storage::DhtSettingKey,
     store_forward::{
         error::StoreAndForwardError,
         message::timestamp_to_datetime,
@@ -45,7 +44,6 @@ use crate::{
     },
     utils::try_convert_all,
 };
-use chrono::Utc;
 use digest::Digest;
 use futures::{future, stream, Future, StreamExt};
 use log::*;
@@ -53,12 +51,12 @@ use prost::Message;
 use std::{convert::TryInto, sync::Arc};
 use tari_comms::{
     message::{EnvelopeBody, MessageTag},
-    peer_manager::{node_id::NodeDistance, NodeIdentity, Peer, PeerManager, PeerManagerError},
+    peer_manager::{node_id::NodeDistance, NodeIdentity, Peer, PeerFeatures, PeerManager, PeerManagerError},
     pipeline::PipelineError,
     types::{Challenge, CommsPublicKey},
     utils::signature,
 };
-use tari_crypto::tari_utilities::ByteArray;
+use tari_utilities::ByteArray;
 use tower::{Service, ServiceExt};
 
 const LOG_TARGET: &str = "comms::dht::storeforward::handler";
@@ -110,17 +108,34 @@ where S: Service<DecryptedDhtMessage, Response = (), Error = PipelineError>
         if message.dht_header.message_type.is_saf_message() && message.decryption_failed() {
             debug!(
                 target: LOG_TARGET,
-                "Received store and forward message which could not decrypt from NodeId={}. Discarding message.",
-                message.source_peer.node_id
+                "Received store and forward message {} which could not decrypt from NodeId={}. Discarding message. \
+                 (Trace: {})",
+                message.tag,
+                message.source_peer.node_id,
+                message.dht_header.message_tag
             );
             return Ok(());
         }
 
         match message.dht_header.message_type {
-            DhtMessageType::SafRequestMessages => self
-                .handle_stored_messages_request(message)
-                .await
-                .map_err(PipelineError::from_debug)?,
+            DhtMessageType::SafRequestMessages => {
+                if self.node_identity.has_peer_features(PeerFeatures::DHT_STORE_FORWARD) {
+                    self.handle_stored_messages_request(message)
+                        .await
+                        .map_err(PipelineError::from_debug)?
+                } else {
+                    // TODO: #banheuristics - requester should not have requested store and forward messages from this
+                    //       node
+                    debug!(
+                        target: LOG_TARGET,
+                        "Received store and forward request {} from peer '{}' however, this node is not a store and \
+                         forward node. Request ignored. (Trace: {})",
+                        message.tag,
+                        message.source_peer.node_id.short_str(),
+                        message.dht_header.message_tag
+                    );
+                }
+            },
 
             DhtMessageType::SafStoredMessages => self
                 .handle_stored_messages(message)
@@ -128,7 +143,12 @@ where S: Service<DecryptedDhtMessage, Response = (), Error = PipelineError>
                 .map_err(PipelineError::from_debug)?,
             // Not a SAF message, call downstream middleware
             _ => {
-                trace!(target: LOG_TARGET, "Passing message onto next service");
+                trace!(
+                    target: LOG_TARGET,
+                    "Passing message {} onto next service (Trace: {})",
+                    message.tag,
+                    message.dht_header.message_tag
+                );
                 self.next_service.oneshot(message).await?;
             },
         }
@@ -143,8 +163,10 @@ where S: Service<DecryptedDhtMessage, Response = (), Error = PipelineError>
     {
         trace!(
             target: LOG_TARGET,
-            "Received request for stored message from {}",
-            message.source_peer.public_key
+            "Received request for stored message {} from {} (Trace: {})",
+            message.tag,
+            message.source_peer.public_key,
+            message.dht_header.message_tag
         );
         let msg = message
             .success()
@@ -153,22 +175,6 @@ where S: Service<DecryptedDhtMessage, Response = (), Error = PipelineError>
         let retrieve_msgs = msg
             .decode_part::<StoredMessagesRequest>(0)?
             .ok_or_else(|| StoreAndForwardError::InvalidEnvelopeBody)?;
-
-        if !self
-            .peer_manager
-            .in_network_region(
-                &message.source_peer.node_id,
-                self.node_identity.node_id(),
-                self.config.saf_num_closest_nodes,
-            )
-            .await?
-        {
-            debug!(
-                target: LOG_TARGET,
-                "Received store and forward message requests from node outside of this nodes network region"
-            );
-            return Ok(());
-        }
 
         let source_pubkey = Box::new(message.source_peer.public_key.clone());
         let source_node_id = Box::new(message.source_peer.node_id.clone());
@@ -194,18 +200,14 @@ where S: Service<DecryptedDhtMessage, Response = (), Error = PipelineError>
             query.with_dist_threshold(dist_threshold);
         }
 
-        let response_types = vec![
-            SafResponseType::ForMe,
-            /* SafResponseType::InRegion,
-             * SafResponseType::Discovery, */
-        ];
+        let response_types = vec![SafResponseType::ForMe];
 
         for resp_type in response_types {
             query.with_response_type(resp_type);
             let messages = self.saf_requester.fetch_messages(query.clone()).await?;
 
             if messages.is_empty() {
-                info!(
+                debug!(
                     target: LOG_TARGET,
                     "No {:?} stored messages for peer '{}'",
                     resp_type,
@@ -214,19 +216,21 @@ where S: Service<DecryptedDhtMessage, Response = (), Error = PipelineError>
                 continue;
             }
 
+            let message_ids = messages.iter().map(|msg| msg.id).collect::<Vec<_>>();
             let stored_messages = StoredMessagesResponse {
                 messages: try_convert_all(messages)?,
                 request_id: retrieve_msgs.request_id,
                 response_type: resp_type as i32,
             };
 
-            info!(
+            debug!(
                 target: LOG_TARGET,
                 "Responding to received message retrieval request with {} {:?} message(s)",
                 stored_messages.messages().len(),
                 resp_type
             );
-            self.outbound_service
+            match self
+                .outbound_service
                 .send_message_no_header(
                     SendMessageParams::new()
                         .direct_public_key(message.source_peer.public_key.clone())
@@ -234,17 +238,40 @@ where S: Service<DecryptedDhtMessage, Response = (), Error = PipelineError>
                         .finish(),
                     stored_messages,
                 )
-                .await?;
+                .await?
+                .resolve()
+                .await
+            {
+                Ok(_) => {
+                    debug!(
+                        target: LOG_TARGET,
+                        "Removing {:?} stored messages for peer '{}'",
+                        message_ids.len(),
+                        message.source_peer.node_id.short_str()
+                    );
+                    trace!(target: LOG_TARGET, "Removing stored messages: {:?}", message_ids,);
+                    self.saf_requester.remove_messages(message_ids).await?;
+                },
+                Err(err) => {
+                    error!(
+                        target: LOG_TARGET,
+                        "Failed to send stored messages to peer '{}': {}",
+                        message.source_peer.node_id.short_str(),
+                        err
+                    );
+                },
+            }
         }
 
         Ok(())
     }
 
-    async fn handle_stored_messages(mut self, message: DecryptedDhtMessage) -> Result<(), StoreAndForwardError> {
+    async fn handle_stored_messages(self, message: DecryptedDhtMessage) -> Result<(), StoreAndForwardError> {
         trace!(
             target: LOG_TARGET,
-            "Received stored messages from {}",
-            message.source_peer.public_key
+            "Received stored messages from {} (Trace: {})",
+            message.source_peer.public_key,
+            message.dht_header.message_tag
         );
         // TODO: Should check that stored messages were requested before accepting them
         let msg = message
@@ -255,21 +282,15 @@ where S: Service<DecryptedDhtMessage, Response = (), Error = PipelineError>
             .ok_or_else(|| StoreAndForwardError::InvalidEnvelopeBody)?;
         let source_peer = Arc::new(message.source_peer);
 
-        info!(
+        debug!(
             target: LOG_TARGET,
             "Received {} stored messages of type {} from peer",
             response.messages().len(),
             SafResponseType::from_i32(response.response_type)
                 .as_ref()
                 .map(|t| format!("{:?}", t))
-                .unwrap_or("<Invalid>".to_string()),
+                .unwrap_or_else(|| "<Invalid>".to_string()),
         );
-
-        let now = Utc::now();
-        debug!(target: LOG_TARGET, "Setting SafLastRequestTimestamp to {}", now);
-        self.dht_requester
-            .set_setting(DhtSettingKey::SafLastRequestTimestamp, now)
-            .await?;
 
         let tasks = response
             .messages
@@ -376,7 +397,7 @@ where S: Service<DecryptedDhtMessage, Response = (), Error = PipelineError>
 
             if message_type.is_dht_message() {
                 if !message_type.is_dht_discovery() {
-                    warn!(
+                    debug!(
                         target: LOG_TARGET,
                         "Discarding {} message from peer '{}'",
                         message_type,
@@ -385,7 +406,7 @@ where S: Service<DecryptedDhtMessage, Response = (), Error = PipelineError>
                     return Err(StoreAndForwardError::InvalidDhtMessageType);
                 }
                 if dht_header.destination.is_unknown() {
-                    warn!(
+                    debug!(
                         target: LOG_TARGET,
                         "Discarding anonymous discovery message from peer '{}'",
                         source_peer.node_id.short_str()
@@ -497,16 +518,12 @@ where S: Service<DecryptedDhtMessage, Response = (), Error = PipelineError>
         let origin_mac = OriginMac::decode(origin_mac_body)?;
         let public_key =
             CommsPublicKey::from_bytes(&origin_mac.public_key).map_err(|_| StoreAndForwardError::InvalidOriginMac)?;
-        signature::verify(&public_key, &origin_mac.signature, body)
-            .map_err(|_| StoreAndForwardError::InvalidOriginMac)
-            .and_then(|is_valid| {
-                if is_valid {
-                    Ok(())
-                } else {
-                    Err(StoreAndForwardError::InvalidOriginMac)
-                }
-            })?;
-        Ok(public_key)
+
+        if signature::verify(&public_key, &origin_mac.signature, body) {
+            Ok(public_key)
+        } else {
+            Err(StoreAndForwardError::InvalidOriginMac)
+        }
     }
 }
 
@@ -526,19 +543,20 @@ mod test {
             make_node_identity,
             make_peer_manager,
             service_spy,
-            DhtMockState,
         },
     };
     use chrono::Utc;
     use futures::channel::mpsc;
     use prost::Message;
     use tari_comms::{message::MessageExt, wrap_in_envelope_body};
-    use tari_crypto::tari_utilities::hex::Hex;
+    use tari_utilities::hex::Hex;
     use tokio::runtime::Handle;
 
     // TODO: unit tests for static functions (check_signature, etc)
 
     fn make_stored_message(node_identity: &NodeIdentity, dht_header: DhtMessageHeader) -> StoredMessage {
+        let body = b"A".to_vec();
+        let body_hash = Challenge::new().chain(body.clone()).result().to_vec().to_hex();
         StoredMessage {
             id: 1,
             version: 0,
@@ -547,10 +565,11 @@ mod test {
             destination_pubkey: None,
             destination_node_id: None,
             header: DhtHeader::from(dht_header).to_encoded_bytes(),
-            body: b"A".to_vec(),
+            body,
             is_encrypted: false,
             priority: StoredMessagePriority::High as i32,
             stored_at: Utc::now().naive_utc(),
+            body_hash,
         }
     }
 
@@ -567,7 +586,15 @@ mod test {
 
         // Recent message
         let (e_sk, e_pk) = make_keypair();
-        let dht_header = make_dht_header(&node_identity, &e_pk, &e_sk, &[], DhtMessageFlags::empty(), false);
+        let dht_header = make_dht_header(
+            &node_identity,
+            &e_pk,
+            &e_sk,
+            &[],
+            DhtMessageFlags::empty(),
+            false,
+            MessageTag::new(),
+        );
         mock_state
             .add_message(make_stored_message(&node_identity, dht_header))
             .await;
@@ -667,9 +694,7 @@ mod test {
         );
         message.dht_header.message_type = DhtMessageType::SafStoredMessages;
 
-        let (dht_requester, mut mock) = create_dht_actor_mock(1);
-        let mock_state = DhtMockState::new();
-        mock.set_shared_state(mock_state.clone());
+        let (dht_requester, mock) = create_dht_actor_mock(1);
         rt_handle.spawn(mock.run());
 
         let task = MessageHandlerTask::new(
@@ -695,6 +720,5 @@ mod test {
         assert!(msgs.contains(&b"A".to_vec()));
         assert!(msgs.contains(&b"B".to_vec()));
         assert!(msgs.contains(&b"Clear".to_vec()));
-        mock_state.get_setting(&DhtSettingKey::SafLastRequestTimestamp).unwrap();
     }
 }

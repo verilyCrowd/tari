@@ -19,13 +19,12 @@
 // SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
 use crate::{
     base_node::{
         chain_metadata_service::ChainMetadataEvent,
-        comms_interface::OutboundNodeCommsInterface,
+        comms_interface::{LocalNodeCommsInterface, OutboundNodeCommsInterface},
         states,
-        states::{BaseNodeState, BlockSyncConfig, StateEvent},
+        states::{BaseNodeState, BlockSyncConfig, StateEvent, StatusInfo},
     },
     chain_storage::{BlockchainBackend, BlockchainDatabase},
 };
@@ -33,7 +32,7 @@ use futures::{future, future::Either, SinkExt};
 use log::*;
 use std::{future::Future, sync::Arc};
 use tari_broadcast_channel::{bounded, Publisher, Subscriber};
-use tari_comms::{connection_manager::ConnectionManagerRequester, PeerManager};
+use tari_comms::{connectivity::ConnectivityRequester, PeerManager};
 use tari_shutdown::ShutdownSignal;
 
 const LOG_TARGET: &str = "c::bn::base_node";
@@ -61,11 +60,15 @@ impl Default for BaseNodeStateMachineConfig {
 /// database and hooks to the p2p network
 pub struct BaseNodeStateMachine<B: BlockchainBackend> {
     pub(super) db: BlockchainDatabase<B>,
+    pub(super) local_node_interface: LocalNodeCommsInterface,
     pub(super) comms: OutboundNodeCommsInterface,
     pub(super) peer_manager: Arc<PeerManager>,
-    pub(super) connection_manager: ConnectionManagerRequester,
+    pub(super) connectivity: ConnectivityRequester,
     pub(super) metadata_event_stream: Subscriber<ChainMetadataEvent>,
     pub(super) config: BaseNodeStateMachineConfig,
+    pub(super) info: StatusInfo,
+    status_event_publisher: Publisher<StatusInfo>,
+    status_event_subscriber: Subscriber<StatusInfo>,
     event_sender: Publisher<StateEvent>,
     event_receiver: Subscriber<StateEvent>,
     interrupt_signal: ShutdownSignal,
@@ -75,25 +78,31 @@ impl<B: BlockchainBackend + 'static> BaseNodeStateMachine<B> {
     /// Instantiate a new Base Node.
     pub fn new(
         db: &BlockchainDatabase<B>,
+        local_node_interface: &LocalNodeCommsInterface,
         comms: &OutboundNodeCommsInterface,
         peer_manager: Arc<PeerManager>,
-        connection_manager: ConnectionManagerRequester,
+        connectivity: ConnectivityRequester,
         metadata_event_stream: Subscriber<ChainMetadataEvent>,
         config: BaseNodeStateMachineConfig,
         shutdown_signal: ShutdownSignal,
     ) -> Self
     {
-        let (event_sender, event_receiver): (Publisher<_>, Subscriber<_>) = bounded(10);
+        let (event_sender, event_receiver): (Publisher<_>, Subscriber<_>) = bounded(10, 3);
+        let (status_event_publisher, status_event_subscriber): (Publisher<_>, Subscriber<_>) = bounded(1, 4); // only latest update is important
         Self {
             db: db.clone(),
+            local_node_interface: local_node_interface.clone(),
             comms: comms.clone(),
             peer_manager,
-            connection_manager,
+            connectivity,
             metadata_event_stream,
             interrupt_signal: shutdown_signal,
             config,
+            info: StatusInfo::StartUp,
             event_sender,
             event_receiver,
+            status_event_publisher,
+            status_event_subscriber,
         }
     }
 
@@ -128,6 +137,18 @@ impl<B: BlockchainBackend + 'static> BaseNodeStateMachine<B> {
         self.event_receiver.clone()
     }
 
+    /// This clones the receiver end of the channel and gives out a copy to the caller
+    /// This allows multiple subscribers to this channel by only keeping one channel and cloning the receiver for every
+    /// caller.
+    pub fn get_status_event_stream(&self) -> Subscriber<StatusInfo> {
+        self.status_event_subscriber.clone()
+    }
+
+    /// This function will publish the current StatusInfo to the channel
+    pub async fn publish_event_info(&mut self) {
+        let _ = self.status_event_publisher.send(self.info.clone()).await;
+    }
+
     /// Start the base node runtime.
     pub async fn run(mut self) {
         use crate::base_node::states::BaseNodeState::*;
@@ -136,7 +157,7 @@ impl<B: BlockchainBackend + 'static> BaseNodeStateMachine<B> {
             if let Shutdown(reason) = &state {
                 debug!(
                     target: LOG_TARGET,
-                    "=== Base Node state machine is shutting down because {}", reason
+                    "Base Node state machine is shutting down because {}", reason
                 );
                 break;
             }
@@ -148,9 +169,11 @@ impl<B: BlockchainBackend + 'static> BaseNodeStateMachine<B> {
             let next_event = select_next_state_event(interrupt_signal, next_state_future).await;
             // Publish the event on the event bus
             let _ = self.event_sender.send(next_event.clone()).await;
-            debug!(
+            trace!(
                 target: LOG_TARGET,
-                "=== Base Node event in State [{}]:  {}", state, next_event
+                "Base Node event in State [{}]:  {}",
+                state,
+                next_event
             );
             state = self.transition(state, next_event);
         }

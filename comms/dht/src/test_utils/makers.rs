@@ -31,8 +31,8 @@ use std::{convert::TryInto, sync::Arc};
 use tari_comms::{
     message::{InboundMessage, MessageExt, MessageTag},
     multiaddr::Multiaddr,
-    net_address::MultiaddressesWithStats,
     peer_manager::{NodeId, NodeIdentity, Peer, PeerFeatures, PeerFlags, PeerManager},
+    transports::MemoryTransport,
     types::{CommsDatabase, CommsPublicKey, CommsSecretKey},
     utils::signature,
     Bytes,
@@ -44,38 +44,23 @@ use tari_crypto::{
 use tari_storage::lmdb_store::LMDBBuilder;
 use tari_test_utils::{paths::create_temporary_data_path, random};
 
-pub fn make_node_identity() -> Arc<NodeIdentity> {
-    Arc::new(
-        NodeIdentity::random(
-            &mut OsRng,
-            "/ip4/127.0.0.1/tcp/9000".parse().unwrap(),
-            PeerFeatures::COMMUNICATION_NODE,
-        )
-        .unwrap(),
-    )
+pub fn make_identity(features: PeerFeatures) -> Arc<NodeIdentity> {
+    let public_addr = format!("/memory/{}", MemoryTransport::acquire_next_memsocket_port())
+        .parse()
+        .unwrap();
+    Arc::new(NodeIdentity::random(&mut OsRng, public_addr, features).unwrap())
 }
 
-pub fn make_peer() -> Peer {
-    let node_identity = make_node_identity();
-    Peer::new(
-        node_identity.public_key().clone(),
-        node_identity.node_id().clone(),
-        vec![node_identity.public_address()].into(),
-        PeerFlags::empty(),
-        PeerFeatures::COMMUNICATION_NODE,
-        &[],
-    )
+pub fn make_node_identity() -> Arc<NodeIdentity> {
+    make_identity(PeerFeatures::COMMUNICATION_NODE)
 }
 
 pub fn make_client_identity() -> Arc<NodeIdentity> {
-    Arc::new(
-        NodeIdentity::random(
-            &mut OsRng,
-            "/ip4/127.0.0.1/tcp/9000".parse().unwrap(),
-            PeerFeatures::COMMUNICATION_CLIENT,
-        )
-        .unwrap(),
-    )
+    make_identity(PeerFeatures::COMMUNICATION_CLIENT)
+}
+
+pub fn make_peer() -> Peer {
+    make_identity(PeerFeatures::COMMUNICATION_NODE).to_peer()
 }
 
 pub fn make_comms_inbound_message(node_identity: &NodeIdentity, message: Bytes) -> InboundMessage {
@@ -99,6 +84,7 @@ pub fn make_dht_header(
     message: &[u8],
     flags: DhtMessageFlags,
     include_origin: bool,
+    trace: MessageTag,
 ) -> DhtMessageHeader
 {
     DhtMessageHeader {
@@ -113,6 +99,7 @@ pub fn make_dht_header(
         message_type: DhtMessageType::None,
         network: Network::LocalTest,
         flags,
+        message_tag: trace,
     }
 }
 
@@ -146,9 +133,10 @@ pub fn make_dht_inbound_message(
     include_origin: bool,
 ) -> DhtInboundMessage
 {
-    let envelope = make_dht_envelope(node_identity, body, flags, include_origin);
+    let msg_tag = MessageTag::new();
+    let envelope = make_dht_envelope(node_identity, body, flags, include_origin, msg_tag);
     DhtInboundMessage::new(
-        MessageTag::new(),
+        msg_tag,
         envelope.header.unwrap().try_into().unwrap(),
         Arc::new(Peer::new(
             node_identity.public_key().clone(),
@@ -171,6 +159,7 @@ pub fn make_dht_envelope(
     mut message: Vec<u8>,
     flags: DhtMessageFlags,
     include_origin: bool,
+    trace: MessageTag,
 ) -> DhtEnvelope
 {
     let (e_sk, e_pk) = make_keypair();
@@ -178,7 +167,7 @@ pub fn make_dht_envelope(
         let shared_secret = crypt::generate_ecdh_secret(&e_sk, node_identity.public_key());
         message = crypt::encrypt(&shared_secret, &message).unwrap();
     }
-    let header = make_dht_header(node_identity, &e_pk, &e_sk, &message, flags, include_origin).into();
+    let header = make_dht_header(node_identity, &e_pk, &e_sk, &message, flags, include_origin, trace).into();
     DhtEnvelope::new(header, message.into())
 }
 
@@ -201,16 +190,10 @@ pub fn make_peer_manager() -> Arc<PeerManager> {
 }
 
 pub fn create_outbound_message(body: &[u8]) -> DhtOutboundMessage {
+    let msg_tag = MessageTag::new();
     DhtOutboundMessage {
-        tag: MessageTag::new(),
-        destination_peer: Peer::new(
-            CommsPublicKey::default(),
-            NodeId::default(),
-            MultiaddressesWithStats::new(vec![]),
-            PeerFlags::empty(),
-            PeerFeatures::COMMUNICATION_NODE,
-            &[],
-        ),
+        tag: msg_tag,
+        destination_node_id: NodeId::default(),
         destination: Default::default(),
         dht_message_type: Default::default(),
         network: Network::LocalTest,

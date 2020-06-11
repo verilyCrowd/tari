@@ -23,7 +23,7 @@
 use crate::{
     base_node::comms_interface::{error::CommsInterfaceError, NodeCommsRequest, NodeCommsResponse},
     blocks::{blockheader::BlockHeader, Block},
-    chain_storage::{ChainMetadata, HistoricalBlock},
+    chain_storage::{ChainMetadata, HistoricalBlock, MmrTree},
     transactions::{
         transaction::{TransactionKernel, TransactionOutput},
         types::HashOutput,
@@ -31,7 +31,7 @@ use crate::{
 };
 use futures::channel::mpsc::UnboundedSender;
 use log::*;
-use tari_comms::{peer_manager::NodeId, types::CommsPublicKey};
+use tari_comms::peer_manager::NodeId;
 use tari_service_framework::reply_channel::SenderService;
 use tower_service::Service;
 
@@ -41,7 +41,7 @@ pub const LOG_TARGET: &str = "c::bn::comms_interface::outbound_interface";
 #[derive(Clone)]
 pub struct OutboundNodeCommsInterface {
     request_sender: SenderService<(NodeCommsRequest, Option<NodeId>), Result<NodeCommsResponse, CommsInterfaceError>>,
-    block_sender: UnboundedSender<(Block, Vec<CommsPublicKey>)>,
+    block_sender: UnboundedSender<(Block, Vec<NodeId>)>,
 }
 
 impl OutboundNodeCommsInterface {
@@ -51,7 +51,7 @@ impl OutboundNodeCommsInterface {
             (NodeCommsRequest, Option<NodeId>),
             Result<NodeCommsResponse, CommsInterfaceError>,
         >,
-        block_sender: UnboundedSender<(Block, Vec<CommsPublicKey>)>,
+        block_sender: UnboundedSender<(Block, Vec<NodeId>)>,
     ) -> Self
     {
         Self {
@@ -270,11 +270,51 @@ impl OutboundNodeCommsInterface {
     pub async fn propagate_block(
         &mut self,
         block: Block,
-        exclude_peers: Vec<CommsPublicKey>,
+        exclude_peers: Vec<NodeId>,
     ) -> Result<(), CommsInterfaceError>
     {
         self.block_sender
             .unbounded_send((block, exclude_peers))
             .map_err(|_| CommsInterfaceError::BroadcastFailed)
+    }
+
+    /// Fetches the total merkle mountain range node count upto the specified height from remote base nodes.
+    pub async fn fetch_mmr_node_count(
+        &mut self,
+        tree: MmrTree,
+        height: u64,
+        node_id: Option<NodeId>,
+    ) -> Result<u32, CommsInterfaceError>
+    {
+        if let NodeCommsResponse::MmrNodeCount(node_count) = self
+            .request_sender
+            .call((NodeCommsRequest::FetchMmrNodeCount(tree, height), node_id))
+            .await??
+        {
+            Ok(node_count)
+        } else {
+            Err(CommsInterfaceError::UnexpectedApiResponse)
+        }
+    }
+
+    /// Fetches the set of leaf node hashes and their deletion status' for the nth to nth+count leaf node index in the
+    /// given MMR tree.
+    pub async fn fetch_mmr_nodes(
+        &mut self,
+        tree: MmrTree,
+        pos: u32,
+        count: u32,
+        node_id: Option<NodeId>,
+    ) -> Result<(Vec<HashOutput>, Vec<u8>), CommsInterfaceError>
+    {
+        if let NodeCommsResponse::MmrNodes(added, deleted) = self
+            .request_sender
+            .call((NodeCommsRequest::FetchMmrNodes(tree, pos, count), node_id))
+            .await??
+        {
+            Ok((added, deleted))
+        } else {
+            Err(CommsInterfaceError::UnexpectedApiResponse)
+        }
     }
 }

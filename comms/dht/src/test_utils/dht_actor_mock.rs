@@ -19,10 +19,11 @@
 // SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+#![allow(dead_code)]
 
 use crate::{
     actor::{DhtRequest, DhtRequester},
-    storage::DhtSettingKey,
+    storage::DhtMetadataKey,
 };
 use futures::{channel::mpsc, stream::Fuse, StreamExt};
 use std::{
@@ -34,6 +35,7 @@ use std::{
     },
 };
 use tari_comms::peer_manager::Peer;
+use tokio::task;
 
 pub fn create_dht_actor_mock(buf_size: usize) -> (DhtRequester, DhtActorMock) {
     let (tx, rx) = mpsc::channel(buf_size);
@@ -64,7 +66,7 @@ impl DhtMockState {
     }
 
     pub fn set_select_peers_response(&self, peers: Vec<Peer>) -> &Self {
-        *acquire_write_lock!(self.select_peers) = peers;
+        *self.select_peers.write().unwrap() = peers;
         self
     }
 
@@ -72,7 +74,7 @@ impl DhtMockState {
         self.call_count.fetch_add(1, Ordering::SeqCst);
     }
 
-    pub fn get_setting(&self, key: &DhtSettingKey) -> Option<Vec<u8>> {
+    pub fn get_setting(&self, key: &DhtMetadataKey) -> Option<Vec<u8>> {
         self.settings.read().unwrap().get(&key.to_string()).map(Clone::clone)
     }
 }
@@ -90,8 +92,12 @@ impl DhtActorMock {
         }
     }
 
-    pub fn set_shared_state(&mut self, state: DhtMockState) {
-        self.state = state;
+    pub fn get_shared_state(&self) -> DhtMockState {
+        self.state.clone()
+    }
+
+    pub fn spawn(self) {
+        task::spawn(Self::run(self));
     }
 
     pub async fn run(mut self) {
@@ -111,10 +117,11 @@ impl DhtActorMock {
             },
             SelectPeers(_, reply_tx) => {
                 let lock = self.state.select_peers.read().unwrap();
-                reply_tx.send(lock.clone()).unwrap();
+                reply_tx
+                    .send(lock.iter().cloned().map(|p| p.node_id).collect())
+                    .unwrap();
             },
-            SendRequestStoredMessages => {},
-            GetSetting(key, reply_tx) => {
+            GetMetadata(key, reply_tx) => {
                 let _ = reply_tx.send(Ok(self
                     .state
                     .settings
@@ -123,8 +130,9 @@ impl DhtActorMock {
                     .get(&key.to_string())
                     .map(Clone::clone)));
             },
-            SetSetting(key, value) => {
+            SetMetadata(key, value, reply_tx) => {
                 self.state.settings.write().unwrap().insert(key.to_string(), value);
+                reply_tx.send(Ok(())).unwrap();
             },
         }
     }

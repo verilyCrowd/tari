@@ -36,9 +36,9 @@ use helpers::{
     sample_blockchains::create_new_blockchain,
 };
 use std::{ops::Deref, sync::Arc, time::Duration};
-use tari_comms_dht::{domain_message::OutboundDomainMessage, outbound::OutboundEncryption};
+use tari_comms_dht::domain_message::OutboundDomainMessage;
 use tari_core::{
-    base_node::service::BaseNodeServiceConfig,
+    base_node::{comms_interface::Broadcast, service::BaseNodeServiceConfig},
     consensus::{ConsensusConstantsBuilder, ConsensusManagerBuilder, Network},
     helpers::create_mem_db,
     mempool::{
@@ -492,7 +492,7 @@ fn request_response_get_stats() {
         MempoolServiceConfig::default(),
         LivenessConfig::default(),
         consensus_manager,
-        temp_dir.path().to_str().unwrap(),
+        temp_dir.path(),
     );
 
     // Create a tx spending the genesis output. Then create 2 orphan txs
@@ -642,7 +642,6 @@ fn receive_and_propagate_transaction() {
             .outbound_message_service
             .send_direct(
                 bob_node.node_identity.public_key().clone(),
-                OutboundEncryption::None,
                 OutboundDomainMessage::new(TariMessageType::NewTransaction, proto::types::Transaction::from(tx)),
             )
             .await
@@ -651,7 +650,6 @@ fn receive_and_propagate_transaction() {
             .outbound_message_service
             .send_direct(
                 carol_node.node_identity.public_key().clone(),
-                OutboundEncryption::None,
                 OutboundDomainMessage::new(TariMessageType::NewTransaction, proto::types::Transaction::from(orphan)),
             )
             .await
@@ -664,15 +662,6 @@ fn receive_and_propagate_transaction() {
             interval = Duration::from_millis(1000)
         );
         async_assert_eventually!(
-            bob_node
-                .mempool
-                .has_tx_with_excess_sig(orphan_excess_sig.clone())
-                .unwrap(),
-            expect = TxStorageResponse::OrphanPool,
-            max_attempts = 10,
-            interval = Duration::from_millis(1000)
-        );
-        async_assert_eventually!(
             carol_node
                 .mempool
                 .has_tx_with_excess_sig(tx_excess_sig.clone())
@@ -681,6 +670,7 @@ fn receive_and_propagate_transaction() {
             max_attempts = 10,
             interval = Duration::from_millis(1000)
         );
+        // Carol got sent the orphan tx directly, so it will be in her mempool
         async_assert_eventually!(
             carol_node
                 .mempool
@@ -689,6 +679,15 @@ fn receive_and_propagate_transaction() {
             expect = TxStorageResponse::OrphanPool,
             max_attempts = 10,
             interval = Duration::from_millis(1000)
+        );
+        // It's difficult to test a negative here, but let's at least make sure that the orphan TX was not propagated
+        // by the time we check it
+        async_assert_eventually!(
+            bob_node
+                .mempool
+                .has_tx_with_excess_sig(orphan_excess_sig.clone())
+                .unwrap(),
+            expect = TxStorageResponse::NotStored,
         );
 
         alice_node.comms.shutdown().await;
@@ -817,7 +816,11 @@ fn block_event_and_reorg_event_handling() {
 
     runtime.block_on(async {
         // Add Block1 - tx1 will be moved to the ReorgPool.
-        assert!(bob.local_nci.submit_block(block1.clone()).await.is_ok());
+        assert!(bob
+            .local_nci
+            .submit_block(block1.clone(), Broadcast::from(true))
+            .await
+            .is_ok());
         async_assert_eventually!(
             alice.mempool.has_tx_with_excess_sig(tx1_excess_sig.clone()).unwrap(),
             expect = TxStorageResponse::ReorgPool,
@@ -826,7 +829,11 @@ fn block_event_and_reorg_event_handling() {
         );
 
         // Add Block2a - tx4 and tx5 will be discarded as double spends.
-        assert!(bob.local_nci.submit_block(block2a.clone()).await.is_ok());
+        assert!(bob
+            .local_nci
+            .submit_block(block2a.clone(), Broadcast::from(true))
+            .await
+            .is_ok());
         async_assert_eventually!(
             alice.mempool.has_tx_with_excess_sig(tx2_excess_sig.clone()).unwrap(),
             expect = TxStorageResponse::ReorgPool,
@@ -846,8 +853,12 @@ fn block_event_and_reorg_event_handling() {
             TxStorageResponse::NotStored
         );
 
-        // Re-org chain by adding Block2b - tx2 and tx3 will be discarded as double spends.
-        assert!(bob.local_nci.submit_block(block2b.clone()).await.is_ok());
+        // Reorg chain by adding Block2b - tx2 and tx3 will be discarded as double spends.
+        assert!(bob
+            .local_nci
+            .submit_block(block2b.clone(), Broadcast::from(true))
+            .await
+            .is_ok());
         async_assert_eventually!(
             alice.mempool.has_tx_with_excess_sig(tx2_excess_sig.clone()).unwrap(),
             expect = TxStorageResponse::NotStored,

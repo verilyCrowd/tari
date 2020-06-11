@@ -19,14 +19,17 @@ pub struct DhtHeader {
     pub network: i32,
     #[prost(uint32, tag = "9")]
     pub flags: u32,
+    /// Message trace ID
+    /// TODO: Remove for mainnet or when testing message traces is not required
+    #[prost(uint64, tag = "10")]
+    pub message_tag: u64,
     #[prost(oneof = "dht_header::Destination", tags = "2, 3, 4")]
     pub destination: ::std::option::Option<dht_header::Destination>,
 }
 pub mod dht_header {
     #[derive(Clone, PartialEq, ::prost::Oneof)]
     pub enum Destination {
-        /// The sender has chosen not to disclose the message destination, or the destination is
-        /// the peer being sent to.
+        /// The sender has chosen not to disclose the message destination
         #[prost(bool, tag = "2")]
         Unknown(bool),
         /// Destined for a particular public key

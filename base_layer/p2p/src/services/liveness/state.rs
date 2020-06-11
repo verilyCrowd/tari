@@ -65,7 +65,7 @@ impl From<Metadata> for HashMap<i32, Vec<u8>, RandomState> {
 }
 
 /// State for the LivenessService.
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct LivenessState {
     inflight_pings: HashMap<u64, (NodeId, NaiveDateTime)>,
     peer_latency: HashMap<NodeId, AverageLatency>,
@@ -74,9 +74,9 @@ pub struct LivenessState {
     pongs_received: AtomicUsize,
     pings_sent: AtomicUsize,
     pongs_sent: AtomicUsize,
-    num_active_neighbours: AtomicUsize,
+    num_active_peers: AtomicUsize,
 
-    pong_metadata: Metadata,
+    local_metadata: Metadata,
     nodes_to_monitor: HashMap<NodeId, NodeStats>,
 }
 
@@ -109,15 +109,6 @@ impl LivenessState {
         self.pongs_received.load(Ordering::Relaxed)
     }
 
-    pub fn num_active_neighbours(&self) -> usize {
-        self.num_active_neighbours.load(Ordering::Relaxed)
-    }
-
-    pub fn set_num_active_neighbours(&self, num_active_neighbours: usize) {
-        self.num_active_neighbours
-            .store(num_active_neighbours, Ordering::Relaxed);
-    }
-
     #[cfg(test)]
     pub fn pings_sent(&self) -> usize {
         self.pings_sent.load(Ordering::Relaxed)
@@ -128,14 +119,14 @@ impl LivenessState {
         self.pongs_sent.load(Ordering::Relaxed)
     }
 
-    /// Returns a reference to pong metadata
-    pub fn pong_metadata(&self) -> &Metadata {
-        &self.pong_metadata
+    /// Returns a reference to local metadata
+    pub fn metadata(&self) -> &Metadata {
+        &self.local_metadata
     }
 
-    /// Set a pong metadata entry. Duplicate entries are replaced.
-    pub fn set_pong_metadata_entry(&mut self, key: MetadataKey, value: Vec<u8>) {
-        self.pong_metadata.insert(key, value);
+    /// Set a metadata entry for the local node. Duplicate entries are replaced.
+    pub fn set_metadata_entry(&mut self, key: MetadataKey, value: Vec<u8>) {
+        self.local_metadata.insert(key, value);
     }
 
     /// Adds a ping to the inflight ping list, while noting the current time that a ping was sent.
@@ -155,6 +146,11 @@ impl LivenessState {
             .drain()
             .filter(|(_, (_, time))| convert_to_std_duration(Utc::now().naive_utc() - *time) <= MAX_INFLIGHT_TTL)
             .collect();
+    }
+
+    /// Returns true if the nonce is inflight, otherwise false
+    pub fn is_inflight(&self, nonce: u64) -> bool {
+        self.inflight_pings.get(&nonce).is_some()
     }
 
     /// Records a pong. Specifically, the pong counter is incremented and
@@ -192,11 +188,30 @@ impl LivenessState {
         self.peer_latency.get(node_id).map(|latency| latency.calc_average())
     }
 
+    /// Add a NodeId to be monitored. If the NodeID already exists then increment the count of how many requests for
+    /// monitoring have occured.
     pub fn add_node_id(&mut self, node_id: &NodeId) {
-        if self.nodes_to_monitor.contains_key(node_id) {
-            return;
+        if let Some(n) = self.nodes_to_monitor.get_mut(node_id) {
+            n.number_of_monitor_requests += 1;
+        } else {
+            let _ = self.nodes_to_monitor.insert(node_id.clone(), NodeStats::new());
         }
-        let _ = self.nodes_to_monitor.insert(node_id.clone(), NodeStats::new());
+    }
+
+    /// Reduce the count of how many request has been received to monitor NodeId, if this would reduce the count to zero
+    /// then remove the NodeId
+    pub fn remove_node_id(&mut self, node_id: &NodeId) {
+        let mut remove_block = false;
+        if let Some(n) = self.nodes_to_monitor.get_mut(node_id) {
+            if n.number_of_monitor_requests > 1 {
+                n.number_of_monitor_requests -= 1;
+            } else {
+                remove_block = true;
+            }
+        }
+        if remove_block {
+            let _ = self.nodes_to_monitor.remove(node_id);
+        }
     }
 
     pub fn get_num_monitored_nodes(&self) -> usize {
@@ -216,6 +231,39 @@ impl LivenessState {
             None => Err(LivenessError::NodeIdDoesNotExist),
             Some(s) => Ok((*s).clone()),
         }
+    }
+
+    pub fn clear_node_ids(&mut self) {
+        self.nodes_to_monitor.clear();
+    }
+
+    pub fn get_best_node_id(&self) -> Result<Option<NodeId>, LivenessError> {
+        if self.nodes_to_monitor.is_empty() {
+            return Ok(None);
+        }
+
+        // We assume that the most recent node to respond with a Pong is the "best"
+        // TODO Consider latency
+        let mut best_node = None;
+        let mut best_recent_pong = None;
+        for (k, v) in self.nodes_to_monitor.iter() {
+            if best_node.is_none() || best_recent_pong.is_none() {
+                best_node = Some(k.clone());
+                best_recent_pong = v.last_pong_received;
+            } else {
+                if let Some(last_pong) = v.last_pong_received {
+                    let current_best_pong = best_recent_pong.unwrap_or_else(|| NaiveDateTime::from_timestamp(0, 0));
+                    let last_pong_duration = Utc::now().naive_utc().signed_duration_since(last_pong);
+                    let current_best_pong_duration = Utc::now().naive_utc().signed_duration_since(current_best_pong);
+                    if last_pong_duration <= current_best_pong_duration {
+                        best_node = Some(k.clone());
+                        best_recent_pong = v.last_pong_received.clone();
+                    }
+                }
+            }
+        }
+
+        Ok(best_node)
     }
 }
 
@@ -265,6 +313,7 @@ pub struct NodeStats {
     last_ping_sent: Option<NaiveDateTime>,
     last_pong_received: Option<NaiveDateTime>,
     average_latency: AverageLatency,
+    number_of_monitor_requests: u32,
 }
 
 impl NodeStats {
@@ -273,6 +322,7 @@ impl NodeStats {
             last_ping_sent: None,
             last_pong_received: None,
             average_latency: AverageLatency::new(LATENCY_SAMPLE_WINDOW_SIZE),
+            number_of_monitor_requests: 1,
         }
     }
 }
@@ -280,6 +330,9 @@ impl NodeStats {
 #[cfg(test)]
 mod test {
     use super::*;
+    use std::{thread, time};
+    use tari_comms::types::CommsPublicKey;
+    use tari_crypto::keys::PublicKey;
 
     #[test]
     fn new() {
@@ -344,31 +397,81 @@ mod test {
     }
 
     #[test]
-    fn set_pong_metadata_entry() {
+    fn set_metadata_entry() {
         let mut state = LivenessState::new();
-        state.set_pong_metadata_entry(MetadataKey::ChainMetadata, b"dummy-data".to_vec());
-        assert_eq!(
-            state.pong_metadata().get(MetadataKey::ChainMetadata).unwrap(),
-            b"dummy-data"
-        );
+        state.set_metadata_entry(MetadataKey::ChainMetadata, b"dummy-data".to_vec());
+        assert_eq!(state.metadata().get(MetadataKey::ChainMetadata).unwrap(), b"dummy-data");
     }
 
     #[test]
     fn monitor_node_id() {
         let node_id = NodeId::default();
+        let (_, pk) = CommsPublicKey::random_keypair(&mut rand::rngs::OsRng);
+        let node_id2 = NodeId::from_key(&pk).unwrap();
         let mut state = LivenessState::new();
+
+        assert!(state.get_best_node_id().unwrap().is_none());
+
         state.add_node_id(&node_id);
 
+        assert_eq!(state.get_best_node_id().unwrap().unwrap(), node_id);
+
         state.add_inflight_ping(123, &node_id);
-
+        // Add some wait time before recording pong to enable time difference measurement, otherwise test
+        // usually fails in Windows.
+        thread::sleep(time::Duration::from_millis(1));
         let latency = state.record_pong(123).unwrap();
-        assert!(latency < 50);
 
+        assert!(latency < 50);
         assert_eq!(state.get_num_monitored_nodes(), 1);
         assert_eq!(state.get_monitored_node_ids().len(), 1);
         assert!(state.is_monitored_node_id(&node_id));
-        let stats = state.get_node_id_stats(&node_id).unwrap();
 
+        let stats = state.get_node_id_stats(&node_id).unwrap();
         assert_eq!(stats.average_latency.calc_average(), latency);
+
+        state.add_node_id(&node_id2);
+        state.add_node_id(&node_id2);
+        assert_eq!(
+            state
+                .nodes_to_monitor
+                .get(&node_id2)
+                .unwrap()
+                .number_of_monitor_requests,
+            2
+        );
+
+        assert_eq!(state.get_num_monitored_nodes(), 2);
+
+        state.add_inflight_ping(1, &node_id2);
+        // Add some wait time before recording pong to enable time difference measurement, otherwise test
+        // usually fails in Windows.
+        thread::sleep(time::Duration::from_millis(1));
+        let _ = state.record_pong(1).unwrap();
+
+        assert_eq!(state.get_best_node_id().unwrap().unwrap(), node_id2);
+
+        state.add_inflight_ping(2, &node_id);
+        // Add some wait time before recording pong to enable time difference measurement, otherwise test
+        // usually fails in Windows.
+        thread::sleep(time::Duration::from_millis(1));
+        let _ = state.record_pong(2).unwrap();
+
+        assert_eq!(state.get_best_node_id().unwrap().unwrap(), node_id);
+
+        state.remove_node_id(&node_id);
+        assert_eq!(state.get_num_monitored_nodes(), 1);
+        state.remove_node_id(&node_id2);
+        assert_eq!(state.get_num_monitored_nodes(), 1);
+        assert_eq!(
+            state
+                .nodes_to_monitor
+                .get(&node_id2)
+                .unwrap()
+                .number_of_monitor_requests,
+            1
+        );
+        state.remove_node_id(&node_id2);
+        assert_eq!(state.get_num_monitored_nodes(), 0);
     }
 }

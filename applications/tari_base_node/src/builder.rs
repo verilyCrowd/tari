@@ -28,11 +28,12 @@ use std::{
     fs,
     path::Path,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     time::Duration,
 };
+use tari_broadcast_channel::Subscriber;
 use tari_common::{CommsTransport, DatabaseType, GlobalConfig, Network, SocksAuthentication, TorControlAuthentication};
 use tari_comms::{
     multiaddr::{Multiaddr, Protocol},
@@ -51,6 +52,7 @@ use tari_core::{
     base_node::{
         chain_metadata_service::{ChainMetadataHandle, ChainMetadataServiceInitializer},
         service::{BaseNodeServiceConfig, BaseNodeServiceInitializer},
+        states::StatusInfo,
         BaseNodeStateMachine,
         BaseNodeStateMachineConfig,
         LocalNodeCommsInterface,
@@ -75,13 +77,13 @@ use tari_core::{
         MempoolValidators,
     },
     mining::Miner,
-    proof_of_work::DiffAdjManager,
     tari_utilities::{hex::Hex, message_format::MessageFormat},
     transactions::{
         crypto::keys::SecretKey as SK,
         types::{CryptoFactories, HashDigest, PrivateKey, PublicKey},
     },
     validation::{
+        accum_difficulty_validators::AccumDifficultyValidator,
         block_validators::{FullConsensusValidator, StatelessBlockValidator},
         transaction_validators::{FullTxValidator, TxInputAndMaturityValidator},
     },
@@ -189,10 +191,19 @@ impl NodeContainer {
         using_backend!(self, ctx, ctx.miner_enabled.clone())
     }
 
+    /// Returns this node's miner atomic hash rate.
+    pub fn miner_hashrate(&self) -> Arc<AtomicU64> {
+        using_backend!(self, ctx, ctx.miner_hashrate.clone())
+    }
+
     /// Returns a handle to the wallet transaction service. This function panics if it has not been registered
     /// with the comms service
     pub fn wallet_transaction_service(&self) -> TransactionServiceHandle {
         using_backend!(self, ctx, ctx.wallet_transaction_service())
+    }
+
+    pub fn get_state_machine_info_channel(&self) -> Subscriber<StatusInfo> {
+        using_backend!(self, ctx, ctx.get_status_event_stream())
     }
 
     async fn run_impl<B: BlockchainBackend + 'static>(mut ctx: BaseNodeContext<B>, rt: runtime::Handle) {
@@ -202,7 +213,7 @@ impl NodeContainer {
         let mut miner = ctx.miner.take().expect("Miner was not constructed");
         let mut rx = miner.get_utxo_receiver_channel();
         rt.spawn(async move {
-            debug!(target: LOG_TARGET, "Mining wallet ready to receive coins.");
+            info!(target: LOG_TARGET, " ⚒️ Mining wallet ready to receive coins.");
             while let Some(utxo) = rx.next().await {
                 match wallet_output_handle.add_output(utxo).await {
                     Ok(_) => {
@@ -214,7 +225,7 @@ impl NodeContainer {
                         let mut oms_handle_clone = wallet_output_handle.clone();
                         tokio::spawn(async move {
                             delay_for(Duration::from_secs(240)).await;
-                            oms_handle_clone.sync_with_base_node().await;
+                            let _ = oms_handle_clone.sync_with_base_node().await;
                         });
                     },
                     Err(e) => warn!(target: LOG_TARGET, "Error adding output: {}", e),
@@ -222,14 +233,11 @@ impl NodeContainer {
             }
         });
         rt.spawn(async move {
-            debug!(target: LOG_TARGET, "Starting miner");
+            info!(target: LOG_TARGET, "⚒️ Starting miner");
             miner.mine().await;
-            debug!(target: LOG_TARGET, "Miner has shutdown");
+            info!(target: LOG_TARGET, "⚒️ Miner has shutdown");
         });
-        info!(
-            target: LOG_TARGET,
-            "Starting node - It will run until a fatal error occurs or until the stop flag is activated."
-        );
+        info!(target: LOG_TARGET, "Starting main base node event loop");
         ctx.node.run().await;
         info!(target: LOG_TARGET, "Initiating communications stack shutdown");
         future::join(ctx.base_node_comms.shutdown(), ctx.wallet_comms.shutdown()).await;
@@ -243,19 +251,22 @@ impl NodeContainer {
 /// `BaseNodeContext` is not intended to be ever used directly, so is a private struct. It is only ever created in the
 /// [NodeContainer] enum, which serves the purpose  of abstracting the specific `BlockchainBackend` instance away
 /// from users of the full base node stack.
-struct BaseNodeContext<B: BlockchainBackend> {
-    pub base_node_comms: CommsNode,
-    pub base_node_dht: Dht,
-    pub wallet_comms: CommsNode,
-    pub wallet_dht: Dht,
-    pub base_node_handles: Arc<ServiceHandles>,
-    pub wallet_handles: Arc<ServiceHandles>,
-    pub node: BaseNodeStateMachine<B>,
-    pub miner: Option<Miner>,
-    pub miner_enabled: Arc<AtomicBool>,
+pub struct BaseNodeContext<B: BlockchainBackend> {
+    base_node_comms: CommsNode,
+    base_node_dht: Dht,
+    wallet_comms: CommsNode,
+    wallet_dht: Dht,
+    base_node_handles: Arc<ServiceHandles>,
+    wallet_handles: Arc<ServiceHandles>,
+    node: BaseNodeStateMachine<B>,
+    miner: Option<Miner>,
+    miner_enabled: Arc<AtomicBool>,
+    pub miner_hashrate: Arc<AtomicU64>,
 }
 
-impl<B: BlockchainBackend> BaseNodeContext<B> {
+impl<B: BlockchainBackend> BaseNodeContext<B>
+where B: 'static
+{
     /// Returns a handle to the Output Manager
     pub fn output_manager(&self) -> OutputManagerHandle {
         self.wallet_handles
@@ -277,11 +288,16 @@ impl<B: BlockchainBackend> BaseNodeContext<B> {
             .expect("Could not get local mempool interface handle")
     }
 
-    /// Return the handle to the Transaciton Service
+    /// Return the handle to the Transaction Service
     pub fn wallet_transaction_service(&self) -> TransactionServiceHandle {
         self.wallet_handles
             .get_handle::<TransactionServiceHandle>()
             .expect("Could not get wallet transaction service handle")
+    }
+
+    // /// Return the state machine channel to provide info updates
+    pub fn get_status_event_stream(&self) -> Subscriber<StatusInfo> {
+        self.node.get_status_event_stream()
     }
 }
 
@@ -461,16 +477,18 @@ where
     let factories = CryptoFactories::default();
     let validators = Validators::new(
         FullConsensusValidator::new(rules.clone(), factories.clone()),
-        StatelessBlockValidator::new(&rules.consensus_constants()),
+        StatelessBlockValidator::new(rules.clone(), factories.clone()),
+        AccumDifficultyValidator {},
     );
-    // TODO - make BlockchainDatabaseConfig configurable
-    let db = BlockchainDatabase::new(backend, &rules, validators, BlockchainDatabaseConfig::default())
-        .map_err(|e| e.to_string())?;
+    let db_config = BlockchainDatabaseConfig {
+        orphan_storage_capacity: config.orphan_storage_capacity,
+        pruning_horizon: config.pruning_horizon,
+        pruned_mode_cleanup_interval: config.pruned_mode_cleanup_interval,
+    };
+    let db = BlockchainDatabase::new(backend, &rules, validators, db_config).map_err(|e| e.to_string())?;
     let mempool_validator =
         MempoolValidators::new(FullTxValidator::new(factories.clone()), TxInputAndMaturityValidator {});
     let mempool = Mempool::new(db.clone(), MempoolConfig::default(), mempool_validator);
-    let diff_adj_manager = DiffAdjManager::new(&rules.consensus_constants()).map_err(|e| e.to_string())?;
-    rules.set_diff_manager(diff_adj_manager).map_err(|e| e.to_string())?;
     let handle = runtime::Handle::current();
 
     //---------------------------------- Base Node --------------------------------------------//
@@ -479,6 +497,11 @@ where
     let base_node_subscriptions = Arc::new(base_node_subscriptions);
     create_peer_db_folder(&config.peer_db_path)?;
     let (base_node_comms, base_node_dht) = setup_base_node_comms(base_node_identity, config, publisher).await?;
+    base_node_comms
+        .connectivity()
+        .add_managed_peers(vec![wallet_node_identity.node_id().clone()])
+        .await
+        .map_err(|err| err.to_string())?;
 
     debug!(target: LOG_TARGET, "Registering base node services");
     let base_node_handles = register_base_node_services(
@@ -493,7 +516,7 @@ where
     debug!(target: LOG_TARGET, "Base node service registration complete.");
 
     //---------------------------------- Wallet --------------------------------------------//
-    let (publisher, wallet_subscriptions) = pubsub_connector(handle.clone(), 100);
+    let (publisher, wallet_subscriptions) = pubsub_connector(handle.clone(), 1000);
     let wallet_subscriptions = Arc::new(wallet_subscriptions);
     create_peer_db_folder(&config.wallet_peer_db_path)?;
     let (wallet_comms, wallet_dht) = setup_wallet_comms(
@@ -556,12 +579,15 @@ where
         .block_sync_strategy
         .parse()
         .expect("Problem reading block sync strategy from config");
-
+    let node_local_interface = base_node_handles
+        .get_handle::<LocalNodeCommsInterface>()
+        .expect("Problem getting node local interface handle.");
     let node = BaseNodeStateMachine::new(
         &db,
+        &node_local_interface,
         &outbound_interface,
         base_node_comms.peer_manager(),
-        base_node_comms.connection_manager(),
+        base_node_comms.connectivity(),
         chain_metadata_service.get_event_stream(),
         state_machine_config,
         interrupt_signal,
@@ -569,25 +595,31 @@ where
 
     //---------------------------------- Mining --------------------------------------------//
 
-    let event_stream = node.get_state_change_event_stream();
+    let local_mp_interface = base_node_handles
+        .get_handle::<LocalMempoolService>()
+        .expect("Problem getting mempool interface handle.");
+    let node_event_stream = node.get_state_change_event_stream();
+    let mempool_event_stream = local_mp_interface.get_mempool_state_event_stream();
     let miner = miner::build_miner(
         &base_node_handles,
         node.get_interrupt_signal(),
-        event_stream,
+        node_event_stream,
+        mempool_event_stream,
         rules,
         config.num_mining_threads,
     );
     if config.enable_mining {
-        debug!(target: LOG_TARGET, "Enabling solo miner");
+        info!(target: LOG_TARGET, "Enabling solo miner");
         miner.enable_mining_flag().store(true, Ordering::Relaxed);
     } else {
-        debug!(
+        info!(
             target: LOG_TARGET,
             "Mining is disabled in the config file. This node will not mine for Tari unless enabled in the UI"
         );
     };
 
     let miner_enabled = miner.enable_mining_flag();
+    let miner_hashrate = miner.get_hashrate_u64();
     Ok(BaseNodeContext {
         base_node_comms,
         base_node_dht,
@@ -598,6 +630,7 @@ where
         node,
         miner: Some(miner),
         miner_enabled,
+        miner_hashrate,
     })
 }
 
@@ -622,11 +655,11 @@ async fn sync_peers(
                     Ok(mut peer) => {
                         peer.unset_id();
                         if let Err(err) = wallet_peer_manager.add_peer(peer).await {
-                            error!(target: LOG_TARGET, "Failed to add peer to wallet: {:?}", err);
+                            warn!(target: LOG_TARGET, "Failed to add peer to wallet: {:?}", err);
                         }
                     },
                     Err(err) => {
-                        error!(target: LOG_TARGET, "Failed to find peer in base node: {:?}", err);
+                        warn!(target: LOG_TARGET, "Failed to find peer in base node: {:?}", err);
                     },
                 }
             }
@@ -956,6 +989,7 @@ async fn setup_base_node_comms(
         // TODO - make this configurable
         dht: DhtConfig {
             database_url: DbConnectionUrl::File(config.data_dir.join("dht.db")),
+            auto_join: true,
             ..Default::default()
         },
         // TODO: This should be false unless testing locally - make this configurable
@@ -963,9 +997,11 @@ async fn setup_base_node_comms(
         listener_liveness_whitelist_cidrs: config.listener_liveness_whitelist_cidrs.clone(),
         listener_liveness_max_sessions: config.listnener_liveness_max_sessions,
     };
-    let (comms, dht) = initialize_comms(comms_config, publisher)
+
+    let seed_peers = parse_peer_seeds(&config.peer_seeds);
+    let (comms, dht) = initialize_comms(comms_config, publisher, seed_peers)
         .await
-        .map_err(|e| format!("Could not create comms layer: {:?}", e))?;
+        .map_err(|e| e.to_friendly_string())?;
 
     // Save final node identity after comms has initialized. This is required because the public_address can be changed
     // by comms during initialization when using tor.
@@ -975,8 +1011,6 @@ async fn setup_base_node_comms(
         save_as_json(&config.tor_identity_file, hs.tor_identity())
             .map_err(|e| format!("Failed to save tor identity: {:?}", e))?;
     }
-
-    add_peers_to_comms(&comms, parse_peer_seeds(&config.peer_seeds)).await?;
 
     Ok((comms, dht))
 }
@@ -1007,6 +1041,7 @@ async fn setup_wallet_comms(
         // TODO - make this configurable
         dht: DhtConfig {
             database_url: DbConnectionUrl::File(config.data_dir.join("dht-wallet.db")),
+            auto_join: true,
             ..Default::default()
         },
         // TODO: This should be false unless testing locally - make this configurable
@@ -1014,7 +1049,10 @@ async fn setup_wallet_comms(
         listener_liveness_whitelist_cidrs: Vec::new(),
         listener_liveness_max_sessions: 0,
     };
-    let (comms, dht) = initialize_comms(comms_config, publisher)
+
+    let mut seed_peers = parse_peer_seeds(&config.peer_seeds);
+    seed_peers.push(base_node_peer);
+    let (comms, dht) = initialize_comms(comms_config, publisher, seed_peers)
         .await
         .map_err(|e| format!("Could not create comms layer: {:?}", e))?;
 
@@ -1027,38 +1065,7 @@ async fn setup_wallet_comms(
             .map_err(|e| format!("Failed to save tor identity: {:?}", e))?;
     }
 
-    add_peers_to_comms(&comms, vec![base_node_peer]).await?;
-
     Ok((comms, dht))
-}
-
-/// Adds a new peer to the base node
-/// ## Parameters
-/// `comms_node` - A reference to the comms node. This is the communications stack
-/// `peers` - A list of peers to be added to the comms node, the current node identity of the comms stack is excluded if
-/// found in the list.
-///
-/// ## Returns
-/// A Result to determine if the call was successful or not, string will indicate the reason on error
-async fn add_peers_to_comms(comms: &CommsNode, peers: Vec<Peer>) -> Result<(), String> {
-    for p in peers {
-        let peer_desc = p.to_string();
-        info!(target: LOG_TARGET, "Adding seed peer [{}]", peer_desc);
-
-        if &p.public_key == comms.node_identity().public_key() {
-            info!(
-                target: LOG_TARGET,
-                "Attempting to add yourself [{}] as a seed peer to comms layer, ignoring request", peer_desc
-            );
-            continue;
-        }
-        comms
-            .peer_manager()
-            .add_peer(p)
-            .await
-            .map_err(|e| format!("Could not add peer {} to comms layer: {}", peer_desc, e))?;
-    }
-    Ok(())
 }
 
 /// Asynchronously registers services of the base node
@@ -1104,9 +1111,10 @@ where
         .add_initializer(LivenessInitializer::new(
             LivenessConfig {
                 auto_ping_interval: Some(Duration::from_secs(30)),
-                enable_auto_join: true,
-                enable_auto_stored_message_request: false,
                 refresh_neighbours_interval: Duration::from_secs(3 * 60),
+                random_peer_selection_ratio: 0.4,
+                useragent: format!("tari/basenode/{}", env!("CARGO_PKG_VERSION")),
+                ..Default::default()
             },
             subscription_factory,
             dht.dht_requester(),
@@ -1140,14 +1148,12 @@ async fn register_wallet_services(
         .add_initializer(LivenessInitializer::new(
             LivenessConfig{
                 auto_ping_interval: None,
-                enable_auto_join: true,
-                enable_auto_stored_message_request: true,
+                useragent: format!("tari/wallet/{}", env!("CARGO_PKG_VERSION")),
                 ..Default::default()
             },
             subscription_factory.clone(),
-            wallet_dht.dht_requester()
-
-        ))
+            wallet_dht.dht_requester(),
+    ))
         // Wallet services
         .add_initializer(OutputManagerServiceInitializer::new(
             OutputManagerServiceConfig::default(),

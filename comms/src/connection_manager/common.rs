@@ -58,6 +58,7 @@ pub async fn perform_identity_exchange<'p, P: IntoIterator<Item = &'p ProtocolId
     debug!(target: LOG_TARGET, "{} substream opened to peer", direction);
 
     let peer_identity = protocol::identity_exchange(node_identity, direction, our_supported_protocols, stream).await?;
+
     Ok(peer_identity)
 }
 
@@ -82,6 +83,7 @@ pub fn is_valid_base_node_node_id(node_id: &NodeId, public_key: &CommsPublicKey)
 /// for p2p comms will be accepted.
 pub async fn validate_and_add_peer_from_peer_identity(
     peer_manager: &PeerManager,
+    known_peer: Option<Peer>,
     authenticated_public_key: CommsPublicKey,
     peer_identity: PeerIdentityMsg,
     allow_test_addrs: bool,
@@ -95,14 +97,6 @@ pub async fn validate_and_add_peer_from_peer_identity(
     if !is_valid_base_node_node_id(&peer_node_id, &authenticated_public_key) {
         return Err(ConnectionManagerError::PeerIdentityInvalidNodeId);
     }
-
-    // Check if we know the peer and if it is banned
-    let maybe_peer = match peer_manager.find_by_public_key(&authenticated_public_key).await {
-        Ok(peer) if peer.is_banned() => return Err(ConnectionManagerError::PeerBanned),
-        Ok(peer) => Some(peer),
-        Err(err) if err.is_peer_not_found() => None,
-        Err(err) => return Err(err.into()),
-    };
 
     let addresses = peer_identity
         .addresses
@@ -124,28 +118,19 @@ pub async fn validate_and_add_peer_from_peer_identity(
         .collect::<Vec<_>>();
 
     // Add or update the peer
-    match maybe_peer {
-        Some(peer) => {
+    let peer = match known_peer {
+        Some(mut peer) => {
             debug!(
                 target: LOG_TARGET,
                 "Peer '{}' already exists in peer list. Updating.",
                 peer.node_id.short_str()
             );
-            let mut conn_stats = peer.connection_stats;
-            conn_stats.set_connection_success();
-            peer_manager
-                .update_peer(
-                    &authenticated_public_key,
-                    Some(peer_node_id.clone()),
-                    Some(addresses),
-                    None,
-                    None,
-                    Some(false),
-                    Some(PeerFeatures::from_bits_truncate(peer_identity.features)),
-                    Some(conn_stats),
-                    Some(supported_protocols),
-                )
-                .await?;
+            peer.connection_stats.set_connection_success();
+            peer.addresses = addresses.into();
+            peer.set_offline(false);
+            peer.features = PeerFeatures::from_bits_truncate(peer_identity.features);
+            peer.supported_protocols = supported_protocols;
+            peer
         },
         None => {
             debug!(
@@ -162,11 +147,26 @@ pub async fn validate_and_add_peer_from_peer_identity(
                 &supported_protocols,
             );
             new_peer.connection_stats.set_connection_success();
-            peer_manager.add_peer(new_peer).await?;
+            new_peer
         },
-    }
+    };
+
+    peer_manager.add_peer(peer).await?;
 
     Ok(peer_node_id)
+}
+
+pub async fn find_unbanned_peer(
+    peer_manager: &PeerManager,
+    authenticated_public_key: &CommsPublicKey,
+) -> Result<Option<Peer>, ConnectionManagerError>
+{
+    match peer_manager.find_by_public_key(&authenticated_public_key).await {
+        Ok(peer) if peer.is_banned() => Err(ConnectionManagerError::PeerBanned),
+        Ok(peer) => Ok(Some(peer)),
+        Err(err) if err.is_peer_not_found() => Ok(None),
+        Err(err) => Err(err.into()),
+    }
 }
 
 pub fn validate_peer_addresses<A: AsRef<[Multiaddr]>>(

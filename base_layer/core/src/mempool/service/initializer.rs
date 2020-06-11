@@ -39,14 +39,14 @@ use crate::{
 use futures::{channel::mpsc::unbounded as futures_mpsc_channel_unbounded, future, Future, Stream, StreamExt};
 use log::*;
 use std::{convert::TryFrom, sync::Arc};
+use tari_broadcast_channel::bounded;
 use tari_comms_dht::outbound::OutboundMessageRequester;
 use tari_p2p::{
-    comms_connector::PeerMessage,
+    comms_connector::{PeerMessage, SubscriptionFactory},
     domain_message::DomainMessage,
     services::utils::{map_decode, ok_or_skip_result},
     tari_message::TariMessageType,
 };
-use tari_pubsub::TopicSubscriptionFactory;
 use tari_service_framework::{
     handles::ServiceHandlesFuture,
     reply_channel,
@@ -57,12 +57,13 @@ use tari_shutdown::ShutdownSignal;
 use tokio::runtime;
 
 const LOG_TARGET: &str = "c::bn::mempool_service::initializer";
+const SUBSCRIPTION_LABEL: &str = "Mempool";
 
 /// Initializer for the Mempool service and service future.
 pub struct MempoolServiceInitializer<T>
 where T: BlockchainBackend
 {
-    inbound_message_subscription_factory: Arc<TopicSubscriptionFactory<TariMessageType, Arc<PeerMessage>>>,
+    inbound_message_subscription_factory: Arc<SubscriptionFactory>,
     mempool: Mempool<T>,
     config: MempoolServiceConfig,
 }
@@ -72,7 +73,7 @@ where T: BlockchainBackend
 {
     /// Create a new MempoolServiceInitializer from the inbound message subscriber.
     pub fn new(
-        inbound_message_subscription_factory: Arc<TopicSubscriptionFactory<TariMessageType, Arc<PeerMessage>>>,
+        inbound_message_subscription_factory: Arc<SubscriptionFactory>,
         mempool: Mempool<T>,
         config: MempoolServiceConfig,
     ) -> Self
@@ -87,7 +88,7 @@ where T: BlockchainBackend
     /// Get a stream for inbound Mempool service request messages
     fn inbound_request_stream(&self) -> impl Stream<Item = DomainMessage<proto::MempoolServiceRequest>> {
         self.inbound_message_subscription_factory
-            .get_subscription(TariMessageType::MempoolRequest)
+            .get_subscription(TariMessageType::MempoolRequest, SUBSCRIPTION_LABEL)
             .map(map_decode::<proto::MempoolServiceRequest>)
             .filter_map(ok_or_skip_result)
     }
@@ -95,7 +96,7 @@ where T: BlockchainBackend
     /// Get a stream for inbound Mempool service response messages
     fn inbound_response_stream(&self) -> impl Stream<Item = DomainMessage<proto::MempoolServiceResponse>> {
         self.inbound_message_subscription_factory
-            .get_subscription(TariMessageType::MempoolResponse)
+            .get_subscription(TariMessageType::MempoolResponse, SUBSCRIPTION_LABEL)
             .map(map_decode::<proto::MempoolServiceResponse>)
             .filter_map(ok_or_skip_result)
     }
@@ -103,7 +104,7 @@ where T: BlockchainBackend
     /// Create a stream of 'New Transaction` messages
     fn inbound_transaction_stream(&self) -> impl Stream<Item = DomainMessage<Transaction>> {
         self.inbound_message_subscription_factory
-            .get_subscription(TariMessageType::NewTransaction)
+            .get_subscription(TariMessageType::NewTransaction, SUBSCRIPTION_LABEL)
             .filter_map(extract_transaction)
     }
 }
@@ -159,12 +160,14 @@ where T: BlockchainBackend + 'static
         let (outbound_tx_sender_service, outbound_tx_stream) = futures_mpsc_channel_unbounded();
         let (outbound_request_sender_service, outbound_request_stream) = reply_channel::unbounded();
         let (local_request_sender_service, local_request_stream) = reply_channel::unbounded();
+        let (mempool_state_event_publisher, mempool_state_event_subscriber) = bounded(100, 6);
         let outbound_mp_interface =
             OutboundMempoolServiceInterface::new(outbound_request_sender_service, outbound_tx_sender_service);
-        let local_mp_interface = LocalMempoolService::new(local_request_sender_service);
+        let local_mp_interface = LocalMempoolService::new(local_request_sender_service, mempool_state_event_subscriber);
         let config = self.config;
         let mempool = self.mempool.clone();
-        let inbound_handlers = MempoolInboundHandlers::new(mempool, outbound_mp_interface.clone());
+        let inbound_handlers =
+            MempoolInboundHandlers::new(mempool_state_event_publisher, mempool, outbound_mp_interface.clone());
 
         // Register handle to OutboundMempoolServiceInterface before waiting for handles to be ready
         handles_fut.register(outbound_mp_interface);

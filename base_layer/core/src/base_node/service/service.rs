@@ -22,7 +22,13 @@
 
 use crate::{
     base_node::{
-        comms_interface::{CommsInterfaceError, InboundNodeCommsHandlers, NodeCommsRequest, NodeCommsResponse},
+        comms_interface::{
+            Broadcast,
+            CommsInterfaceError,
+            InboundNodeCommsHandlers,
+            NodeCommsRequest,
+            NodeCommsResponse,
+        },
         consts::{BASE_NODE_SERVICE_DESIRED_RESPONSE_FRACTION, BASE_NODE_SERVICE_REQUEST_TIMEOUT},
         generate_request_key,
         proto,
@@ -47,13 +53,13 @@ use futures::{
 use log::*;
 use rand::rngs::OsRng;
 use std::{convert::TryInto, time::Duration};
-use tari_comms::{peer_manager::NodeId, types::CommsPublicKey};
+use tari_comms::peer_manager::NodeId;
 use tari_comms_dht::{
     domain_message::OutboundDomainMessage,
     envelope::NodeDestination,
     outbound::{OutboundEncryption, OutboundMessageRequester, SendMessageParams},
 };
-use tari_crypto::ristretto::RistrettoPublicKey;
+use tari_crypto::tari_utilities::{hex::Hex, Hashable};
 use tari_p2p::{domain_message::DomainMessage, tari_message::TariMessageType};
 use tari_service_framework::RequestContext;
 use tokio::task;
@@ -81,7 +87,7 @@ impl Default for BaseNodeServiceConfig {
 /// A convenience struct to hold all the BaseNode streams
 pub struct BaseNodeStreams<SOutReq, SInReq, SInRes, SBlockIn, SLocalReq, SLocalBlock> {
     outbound_request_stream: SOutReq,
-    outbound_block_stream: UnboundedReceiver<(Block, Vec<CommsPublicKey>)>,
+    outbound_block_stream: UnboundedReceiver<(Block, Vec<NodeId>)>,
     inbound_request_stream: SInReq,
     inbound_response_stream: SInRes,
     inbound_block_stream: SBlockIn,
@@ -99,11 +105,11 @@ where
     SInRes: Stream<Item = DomainMessage<proto::BaseNodeServiceResponse>>,
     SBlockIn: Stream<Item = DomainMessage<Block>>,
     SLocalReq: Stream<Item = RequestContext<NodeCommsRequest, Result<NodeCommsResponse, CommsInterfaceError>>>,
-    SLocalBlock: Stream<Item = RequestContext<Block, Result<(), CommsInterfaceError>>>,
+    SLocalBlock: Stream<Item = RequestContext<(Block, Broadcast), Result<(), CommsInterfaceError>>>,
 {
     pub fn new(
         outbound_request_stream: SOutReq,
-        outbound_block_stream: UnboundedReceiver<(Block, Vec<CommsPublicKey>)>,
+        outbound_block_stream: UnboundedReceiver<(Block, Vec<NodeId>)>,
         inbound_request_stream: SInReq,
         inbound_response_stream: SInRes,
         inbound_block_stream: SBlockIn,
@@ -166,7 +172,7 @@ where B: BlockchainBackend + 'static
         SInRes: Stream<Item = DomainMessage<proto::BaseNodeServiceResponse>>,
         SBlockIn: Stream<Item = DomainMessage<Block>>,
         SLocalReq: Stream<Item = RequestContext<NodeCommsRequest, Result<NodeCommsResponse, CommsInterfaceError>>>,
-        SLocalBlock: Stream<Item = RequestContext<Block, Result<(), CommsInterfaceError>>>,
+        SLocalBlock: Stream<Item = RequestContext<(Block, Broadcast), Result<(), CommsInterfaceError>>>,
     {
         let outbound_request_stream = streams.outbound_request_stream.fuse();
         pin_mut!(outbound_request_stream);
@@ -196,8 +202,8 @@ where B: BlockchainBackend + 'static
                 },
 
                 // Outbound block messages from the OutboundNodeCommsInterface
-                outbound_block_context = outbound_block_stream.select_next_some() => {
-                    self.spawn_handle_outbound_block(outbound_block_context);
+                (block, excluded_peers) = outbound_block_stream.select_next_some() => {
+                    self.spawn_handle_outbound_block(block, excluded_peers);
                 },
 
                 // Incoming request messages from the Comms layer
@@ -273,10 +279,9 @@ where B: BlockchainBackend + 'static
         });
     }
 
-    fn spawn_handle_outbound_block(&self, block_context: (Block, Vec<RistrettoPublicKey>)) {
+    fn spawn_handle_outbound_block(&self, block: Block, excluded_peers: Vec<NodeId>) {
         let outbound_message_service = self.outbound_message_service.clone();
         task::spawn(async move {
-            let (block, excluded_peers) = block_context;
             let _ = handle_outbound_block(outbound_message_service, block, excluded_peers)
                 .await
                 .or_else(|err| {
@@ -359,7 +364,11 @@ where B: BlockchainBackend + 'static
         });
     }
 
-    fn spawn_handle_local_block(&self, block_context: RequestContext<Block, Result<(), CommsInterfaceError>>) {
+    fn spawn_handle_local_block(
+        &self,
+        block_context: RequestContext<(Block, Broadcast), Result<(), CommsInterfaceError>>,
+    )
+    {
         let mut inbound_nch = self.inbound_nch.clone();
         task::spawn(async move {
             let (block, reply_tx) = block_context.split();
@@ -398,13 +407,53 @@ async fn handle_incoming_request<B: BlockchainBackend + 'static>(
         response: Some(response.into()),
     };
 
-    outbound_message_service
+    trace!(
+        target: LOG_TARGET,
+        "Attempting outbound message in response to inbound request ({})",
+        inner_msg.request_key
+    );
+    let send_message_response = outbound_message_service
         .send_direct(
             origin_public_key,
-            OutboundEncryption::None,
             OutboundDomainMessage::new(TariMessageType::BaseNodeResponse, message),
         )
         .await?;
+
+    let request_key = inner_msg.request_key;
+    tokio::spawn(async move {
+        match send_message_response.resolve().await {
+            Err(err) => {
+                error!(
+                    target: LOG_TARGET,
+                    "Incoming request ({}) response failed to send: {}", request_key, err
+                );
+            },
+            Ok(send_states) => {
+                let msg_tag = send_states[0].tag;
+                trace!(
+                    target: LOG_TARGET,
+                    "Incoming request ({}) response queued with {}",
+                    request_key,
+                    &msg_tag,
+                );
+                if send_states.wait_single().await {
+                    trace!(
+                        target: LOG_TARGET,
+                        "Incoming request ({}) response Direct Send was successful {}",
+                        request_key,
+                        msg_tag
+                    );
+                } else {
+                    error!(
+                        target: LOG_TARGET,
+                        "Incoming request ({}) response Direct Send was unsuccessful and no message was sent {}",
+                        request_key,
+                        msg_tag
+                    );
+                }
+            },
+        };
+    });
 
     Ok(())
 }
@@ -419,7 +468,7 @@ async fn handle_incoming_response(
         .and_then(|r| r.try_into().ok())
         .ok_or_else(|| BaseNodeServiceError::InvalidResponse("Received an invalid base node response".to_string()))?;
 
-    if let Some(reply_tx) = waiting_requests.remove(request_key)? {
+    if let Some(reply_tx) = waiting_requests.remove(request_key).await {
         let _ = reply_tx.send(Ok(response).or_else(|resp| {
             warn!(
                 target: LOG_TARGET,
@@ -454,6 +503,7 @@ async fn handle_outbound_request(
         None => send_msg_params.random(1),
     };
 
+    trace!(target: LOG_TARGET, "Attempting outbound request ({})", request_key);
     let send_result = outbound_message_service
         .send_message(
             send_msg_params.finish(),
@@ -462,8 +512,8 @@ async fn handle_outbound_request(
         .await
         .map_err(|e| CommsInterfaceError::OutboundMessageService(e.to_string()))?;
 
-    match send_result.resolve_ok().await {
-        Some(send_states) if send_states.is_empty() => {
+    match send_result.resolve().await {
+        Ok(send_states) if send_states.is_empty() => {
             let _ = reply_tx
                 .send(Err(CommsInterfaceError::NoBootstrapNodesConfigured))
                 .or_else(|resp| {
@@ -474,21 +524,40 @@ async fn handle_outbound_request(
                     Err(resp)
                 });
         },
-        Some(_tags) => {
+        Ok(send_states) => {
             // Wait for matching responses to arrive
-            waiting_requests
-                .insert(request_key, Some(reply_tx))
-                .map_err(|_| CommsInterfaceError::UnexpectedApiResponse)?;
+            waiting_requests.insert(request_key, Some(reply_tx)).await;
             // Spawn timeout for waiting_request
             spawn_request_timeout(timeout_sender, request_key, config.request_timeout);
+            // Log messages
+            let msg_tag = send_states[0].tag;
+            debug!(
+                target: LOG_TARGET,
+                "Outbound request ({}) response queued with {}", request_key, &msg_tag,
+            );
+            tokio::spawn(async move {
+                if send_states.wait_single().await {
+                    debug!(
+                        target: LOG_TARGET,
+                        "Outbound request ({}) response Direct Send was successful {}", request_key, msg_tag
+                    );
+                } else {
+                    error!(
+                        target: LOG_TARGET,
+                        "Outbound request ({}) response Direct Send was unsuccessful and no message was sent",
+                        request_key
+                    );
+                };
+            });
         },
-        None => {
+        Err(err) => {
+            debug!(target: LOG_TARGET, "Failed to send outbound request: {}", err);
             let _ = reply_tx
                 .send(Err(CommsInterfaceError::BroadcastFailed))
                 .or_else(|resp| {
                     error!(
                         target: LOG_TARGET,
-                        "Failed to send outbound request because DHT outbound broadcast failed"
+                        "Failed to send outbound request ({}) because DHT outbound broadcast failed", request_key
                     );
                     Err(resp)
                 });
@@ -500,7 +569,7 @@ async fn handle_outbound_request(
 async fn handle_outbound_block(
     mut outbound_message_service: OutboundMessageRequester,
     block: Block,
-    exclude_peers: Vec<CommsPublicKey>,
+    exclude_peers: Vec<NodeId>,
 ) -> Result<(), CommsInterfaceError>
 {
     outbound_message_service
@@ -523,10 +592,7 @@ async fn handle_request_timeout(
     request_key: RequestKey,
 ) -> Result<(), CommsInterfaceError>
 {
-    if let Some(reply_tx) = waiting_requests
-        .remove(request_key)
-        .map_err(|_| CommsInterfaceError::UnexpectedApiResponse)?
-    {
+    if let Some(reply_tx) = waiting_requests.remove(request_key).await {
         let reply_msg = Err(CommsInterfaceError::RequestTimedOut);
         let _ = reply_tx.send(reply_msg.or_else(|resp| {
             error!(
@@ -553,10 +619,11 @@ async fn handle_incoming_block<B: BlockchainBackend + 'static>(
 {
     let DomainMessage::<_> { source_peer, inner, .. } = domain_block_msg;
 
-    info!(
-        "New candidate block received for height {} and total accumulated difficulty {}",
+    debug!(
+        "New candidate block #{} (accum_diff: {}, hash: ({})) received.",
         inner.header.height,
-        inner.header.total_accumulated_difficulty_inclusive()
+        inner.header.total_accumulated_difficulty_inclusive(),
+        inner.header.hash().to_hex(),
     );
     trace!(
         target: LOG_TARGET,
@@ -564,7 +631,9 @@ async fn handle_incoming_block<B: BlockchainBackend + 'static>(
         inner,
         source_peer.public_key
     );
-    inbound_nch.handle_block(&inner, Some(source_peer.public_key)).await?;
+    inbound_nch
+        .handle_block(&(inner, true.into()), Some(source_peer.node_id))
+        .await?;
 
     // TODO - retain peer info for stats and potential banning for sending invalid blocks
 

@@ -19,9 +19,12 @@
 // SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
 use crate::{
-    base_node::{states::StateEvent, BaseNodeStateMachine},
+    base_node::{
+        comms_interface::{Broadcast, CommsInterfaceError},
+        states::{StateEvent, StatusInfo},
+        BaseNodeStateMachine,
+    },
     blocks::BlockHeader,
     chain_storage::{BlockchainBackend, BlockchainDatabase, ChainStorageError},
     transactions::types::HashOutput,
@@ -73,6 +76,11 @@ async fn synchronize_blocks<B: BlockchainBackend + 'static>(
 {
     let mut sync_nodes = Vec::from(sync_nodes);
     let tip = shared.db.fetch_tip_header().map_err(|e| e.to_string())?;
+    if let StatusInfo::BlockSync(ref mut info) = shared.info {
+        info.tip_height = Some(tip.height);
+    }
+
+    shared.publish_event_info().await;
     let mut from_headers = fetch_headers_to_send::<B>(&tip, &shared.db);
     let mut sync_node = next_sync_node(&mut sync_nodes);
 
@@ -81,7 +89,6 @@ async fn synchronize_blocks<B: BlockchainBackend + 'static>(
             return Err("No more valid nodes to sync to".to_string());
         }
         let sync_node_string = sync_node.clone().unwrap();
-
         info!(
             target: LOG_TARGET,
             "Attempting to sync with node:{} asking for headers between heights {} and {}",
@@ -89,6 +96,13 @@ async fn synchronize_blocks<B: BlockchainBackend + 'static>(
             from_headers.last().map(|h| h.height).unwrap(),
             from_headers.first().map(|h| h.height).unwrap(),
         );
+        if let StatusInfo::BlockSync(ref mut info) = shared.info {
+            info.sync_peers.clear();
+            info.sync_peers.push(sync_node_string.clone());
+            info.tip_height = Some(from_headers.last().map(|h| h.height).unwrap());
+            info.local_height = Some(from_headers.first().map(|h| h.height).unwrap());
+        }
+        shared.publish_event_info().await;
         match shared
             .comms
             .fetch_headers_between(from_headers.iter().map(|h| h.hash()).collect(), None, sync_node.clone())
@@ -110,7 +124,7 @@ async fn synchronize_blocks<B: BlockchainBackend + 'static>(
                             // than the headers we sent.
                             let oldest_header_sent = from_headers.last().unwrap();
                             if block.height == 0 && oldest_header_sent.height != 1 {
-                                info!(
+                                debug!(
                                     target: LOG_TARGET,
                                     "No headers from peer {} matched with the headers we sent. Retrying with older \
                                      headers",
@@ -119,7 +133,7 @@ async fn synchronize_blocks<B: BlockchainBackend + 'static>(
                                 from_headers = fetch_headers_to_send::<B>(oldest_header_sent, &shared.db);
                                 continue;
                             } else {
-                                info!(
+                                debug!(
                                     target: LOG_TARGET,
                                     "Chain split at height:{} according to sync peer:{}",
                                     block.height,
@@ -127,7 +141,7 @@ async fn synchronize_blocks<B: BlockchainBackend + 'static>(
                                 );
                             }
                         } else {
-                            info!(
+                            debug!(
                                 target: LOG_TARGET,
                                 "Still on the best chain according to sync peer:{}", sync_node_string
                             );
@@ -223,21 +237,32 @@ async fn download_blocks<B: BlockchainBackend + 'static>(
     match shared.comms.fetch_blocks_with_hashes(curr_headers.clone()).await {
         Ok(blocks) => {
             info!(target: LOG_TARGET, "Received {} blocks from peer", blocks.len());
+            if !blocks.is_empty() {
+                if let StatusInfo::BlockSync(ref mut info) = shared.info {
+                    info.tip_height = Some(blocks[blocks.len() - 1].block().header.height);
+                    info.local_height = Some(blocks[0].block().header.height);
+                }
+                shared.publish_event_info().await;
+            }
             for i in 0..blocks.len() {
                 let hist_block = &blocks[i];
                 let header = &curr_headers[i];
                 let block_hash = hist_block.block().hash();
                 if &block_hash == header {
-                    match shared.db.add_block(hist_block.block().clone()) {
+                    match shared
+                        .local_node_interface
+                        .submit_block(hist_block.block.clone(), Broadcast::from(false))
+                        .await
+                    {
                         Ok(result) => {
-                            info!(
+                            debug!(
                                 target: LOG_TARGET,
                                 "Added block {} during sync. Result:{:?}",
                                 header.to_hex(),
                                 result
                             );
                         },
-                        Err(ChainStorageError::InvalidBlock) => {
+                        Err(CommsInterfaceError::ChainStorageError(ChainStorageError::InvalidBlock)) => {
                             warn!(
                                 target: LOG_TARGET,
                                 "Invalid block {} received from peer. Retrying",
@@ -245,7 +270,7 @@ async fn download_blocks<B: BlockchainBackend + 'static>(
                             );
                             return Ok(false);
                         },
-                        Err(ChainStorageError::ValidationError { source }) => {
+                        Err(CommsInterfaceError::ChainStorageError(ChainStorageError::ValidationError { source })) => {
                             warn!(
                                 target: LOG_TARGET,
                                 "Validation on block {} because of {} from peer failed. Retrying",

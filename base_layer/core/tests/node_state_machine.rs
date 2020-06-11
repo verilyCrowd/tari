@@ -38,6 +38,7 @@ use helpers::{
         create_network_with_2_base_nodes_with_config,
         create_network_with_3_base_nodes_with_config,
         random_node_identity,
+        wait_until_online,
         BaseNodeBuilder,
     },
 };
@@ -46,11 +47,12 @@ use std::{thread, time::Duration};
 use tari_core::{
     base_node::{
         chain_metadata_service::PeerChainMetadata,
+        comms_interface::Broadcast,
         service::BaseNodeServiceConfig,
         states::{
             BestChainMetadataBlockSyncInfo,
             BlockSyncConfig,
-            ListeningInfo,
+            ListeningData,
             StateEvent,
             SyncStatus,
             SyncStatus::Lagging,
@@ -62,12 +64,16 @@ use tari_core::{
     helpers::create_mem_db,
     mempool::MempoolServiceConfig,
     transactions::types::CryptoFactories,
-    validation::{block_validators::StatelessBlockValidator, mocks::MockValidator},
+    validation::{
+        accum_difficulty_validators::MockAccumDifficultyValidator,
+        block_validators::MockStatelessBlockValidator,
+        mocks::MockValidator,
+    },
 };
 use tari_mmr::MmrCacheConfig;
 use tari_p2p::services::liveness::LivenessConfig;
 use tari_shutdown::Shutdown;
-use tari_test_utils::{async_assert_eventually, random::string};
+use tari_test_utils::{collect_stream, random::string};
 use tempdir::TempDir;
 use tokio::{runtime::Runtime, time};
 
@@ -91,10 +97,8 @@ fn test_listening_lagging() {
         MmrCacheConfig::default(),
         MempoolServiceConfig::default(),
         LivenessConfig {
-            enable_auto_join: false,
-            enable_auto_stored_message_request: false,
             auto_ping_interval: Some(Duration::from_millis(100)),
-            refresh_neighbours_interval: Duration::from_secs(60),
+            ..Default::default()
         },
         consensus_manager,
         temp_dir.path().to_str().unwrap(),
@@ -102,15 +106,17 @@ fn test_listening_lagging() {
     let shutdown = Shutdown::new();
     let mut alice_state_machine = BaseNodeStateMachine::new(
         &alice_node.blockchain_db,
+        &alice_node.local_nci,
         &alice_node.outbound_nci,
         alice_node.comms.peer_manager(),
-        alice_node.comms.connection_manager(),
+        alice_node.comms.connectivity(),
         alice_node.chain_metadata_handle.get_event_stream(),
         BaseNodeStateMachineConfig::default(),
         shutdown.to_signal(),
     );
+    wait_until_online(&mut runtime, &[&alice_node, &bob_node]);
 
-    let await_event_task = runtime.spawn(async move { ListeningInfo.next_event(&mut alice_state_machine).await });
+    let await_event_task = runtime.spawn(async move { ListeningData.next_event(&mut alice_state_machine).await });
 
     runtime.block_on(async move {
         let bob_db = bob_node.blockchain_db;
@@ -133,7 +139,10 @@ fn test_listening_lagging() {
                 &consensus_manager.consensus_constants(),
             ))
             .unwrap();
-        bob_local_nci.submit_block(prev_block).await.unwrap();
+        bob_local_nci
+            .submit_block(prev_block, Broadcast::from(true))
+            .await
+            .unwrap();
         assert_eq!(bob_db.get_height(), Ok(Some(2)));
 
         let next_event = time::timeout(Duration::from_secs(10), await_event_task)
@@ -163,9 +172,10 @@ fn test_event_channel() {
     let mut mock = MockChainMetadata::new();
     let state_machine = BaseNodeStateMachine::new(
         &db,
+        &node.local_nci,
         &node.outbound_nci,
         node.comms.peer_manager(),
-        node.comms.connection_manager(),
+        node.comms.connectivity(),
         mock.subscriber(),
         BaseNodeStateMachineConfig::default(),
         shutdown.to_signal(),
@@ -238,9 +248,10 @@ fn test_block_sync() {
     let shutdown = Shutdown::new();
     let mut alice_state_machine = BaseNodeStateMachine::new(
         &alice_node.blockchain_db,
+        &alice_node.local_nci,
         &alice_node.outbound_nci,
         alice_node.comms.peer_manager(),
-        alice_node.comms.connection_manager(),
+        alice_node.comms.connectivity(),
         alice_node.chain_metadata_handle.get_event_stream(),
         state_machine_config,
         shutdown.to_signal(),
@@ -316,9 +327,10 @@ fn test_lagging_block_sync() {
     let shutdown = Shutdown::new();
     let mut alice_state_machine = BaseNodeStateMachine::new(
         &alice_node.blockchain_db,
+        &alice_node.local_nci,
         &alice_node.outbound_nci,
         alice_node.comms.peer_manager(),
-        alice_node.comms.connection_manager(),
+        alice_node.comms.connectivity(),
         alice_node.chain_metadata_handle.get_event_stream(),
         state_machine_config,
         shutdown.to_signal(),
@@ -411,9 +423,10 @@ fn test_block_sync_recovery() {
     let shutdown = Shutdown::new();
     let mut alice_state_machine = BaseNodeStateMachine::new(
         &alice_node.blockchain_db,
+        &alice_node.local_nci,
         &alice_node.outbound_nci,
         alice_node.comms.peer_manager(),
-        alice_node.comms.connection_manager(),
+        alice_node.comms.connectivity(),
         alice_node.chain_metadata_handle.get_event_stream(),
         state_machine_config,
         shutdown.to_signal(),
@@ -506,9 +519,10 @@ fn test_forked_block_sync() {
     let shutdown = Shutdown::new();
     let mut alice_state_machine = BaseNodeStateMachine::new(
         &alice_node.blockchain_db,
+        &alice_node.local_nci,
         &alice_node.outbound_nci,
         alice_node.comms.peer_manager(),
-        alice_node.comms.connection_manager(),
+        alice_node.comms.connectivity(),
         alice_node.chain_metadata_handle.get_event_stream(),
         state_machine_config,
         shutdown.to_signal(),
@@ -592,7 +606,7 @@ fn test_sync_peer_banning() {
         .with_consensus_constants(consensus_constants)
         .with_block(prev_block.clone())
         .build();
-    let stateless_block_validator = StatelessBlockValidator::new(consensus_manager.consensus_constants());
+    let stateless_block_validator = MockStatelessBlockValidator::new(consensus_manager.clone(), factories.clone());
     let mock_validator = MockValidator::new(true);
     // Create base nodes
     let alice_node_identity = random_node_identity();
@@ -609,36 +623,24 @@ fn test_sync_peer_banning() {
         .with_base_node_service_config(base_node_service_config)
         .with_mmr_cache_config(mmr_cache_config)
         .with_mempool_service_config(mempool_service_config)
-        .with_liveness_service_config(liveness_service_config)
+        .with_liveness_service_config(liveness_service_config.clone())
         .with_consensus_manager(consensus_manager)
-        .with_validators(mock_validator, stateless_block_validator)
+        .with_validators(
+            mock_validator,
+            stateless_block_validator,
+            MockAccumDifficultyValidator {},
+        )
         .start(&mut runtime, data_path);
     let (bob_node, consensus_manager) = BaseNodeBuilder::new(network)
         .with_node_identity(bob_node_identity)
         .with_base_node_service_config(base_node_service_config)
         .with_mmr_cache_config(mmr_cache_config)
         .with_mempool_service_config(mempool_service_config)
-        .with_liveness_service_config(liveness_service_config)
+        .with_liveness_service_config(liveness_service_config.clone())
         .with_consensus_manager(consensus_manager)
         .start(&mut runtime, data_path);
-    // Wait for peers to connect
-    runtime.block_on(async {
-        let _ = alice_node
-            .comms
-            .connection_manager()
-            .dial_peer(bob_node.node_identity.node_id().clone())
-            .await;
-        async_assert_eventually!(
-            bob_node
-                .comms
-                .peer_manager()
-                .exists(alice_node.node_identity.public_key())
-                .await,
-            expect = true,
-            max_attempts = 20,
-            interval = Duration::from_millis(1000)
-        );
-    });
+
+    wait_until_online(&mut runtime, &[&alice_node, &bob_node]);
 
     let state_machine_config = BaseNodeStateMachineConfig {
         block_sync_config: BlockSyncConfig {
@@ -655,9 +657,10 @@ fn test_sync_peer_banning() {
     let shutdown = Shutdown::new();
     let mut alice_state_machine = BaseNodeStateMachine::new(
         &alice_node.blockchain_db,
+        &alice_node.local_nci,
         &alice_node.outbound_nci,
         alice_node.comms.peer_manager(),
-        alice_node.comms.connection_manager(),
+        alice_node.comms.connectivity(),
         alice_node.chain_metadata_handle.get_event_stream(),
         state_machine_config,
         shutdown.to_signal(),
@@ -733,6 +736,7 @@ fn test_sync_peer_banning() {
         assert_eq!(alice_db.get_height(), Ok(Some(4)));
         assert_eq!(bob_db.get_height(), Ok(Some(6)));
 
+        let mut connectivity_events = alice_node.comms.connectivity().subscribe_event_stream();
         let network_tip = bob_db.get_metadata().unwrap();
         let mut sync_peers = vec![bob_node.node_identity.node_id().clone()];
         let state_event = BestChainMetadataBlockSyncInfo {}
@@ -741,6 +745,9 @@ fn test_sync_peer_banning() {
         assert_eq!(state_event, StateEvent::BlockSyncFailure);
 
         assert_eq!(alice_db.get_height(), Ok(Some(4)));
+
+        let _events = collect_stream!(connectivity_events, take = 1, timeout = Duration::from_secs(10));
+
         let peer = alice_peer_manager.find_by_public_key(bob_public_key).await.unwrap();
         assert_eq!(peer.is_banned(), true);
 

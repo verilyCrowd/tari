@@ -31,7 +31,7 @@ use helpers::{
 };
 use std::{sync::atomic::Ordering, time::Duration};
 use tari_broadcast_channel::{bounded, Publisher, Subscriber};
-use tari_comms_dht::{domain_message::OutboundDomainMessage, outbound::OutboundEncryption};
+use tari_comms_dht::domain_message::OutboundDomainMessage;
 use tari_core::{
     base_node::{service::BaseNodeServiceConfig, states::StateEvent},
     consensus::{ConsensusManagerBuilder, Network},
@@ -80,7 +80,6 @@ fn mining() {
             .outbound_message_service
             .send_direct(
                 alice_node.node_identity.public_key().clone(),
-                OutboundEncryption::None,
                 OutboundDomainMessage::new(
                     TariMessageType::NewTransaction,
                     proto::types::Transaction::from(tx1.clone()),
@@ -102,8 +101,9 @@ fn mining() {
     let shutdown = Shutdown::new();
     let mut miner = Miner::new(shutdown.to_signal(), consensus_manager, &alice_node.local_nci, 1);
     miner.enable_mining_flag().store(true, Ordering::Relaxed);
-    let (mut state_event_sender, state_event_receiver): (Publisher<_>, Subscriber<_>) = bounded(1);
-    miner.subscribe_to_state_change(state_event_receiver);
+    let (mut state_event_sender, state_event_receiver): (Publisher<_>, Subscriber<_>) = bounded(1, 112);
+    miner.subscribe_to_node_state_events(state_event_receiver);
+    miner.subscribe_to_mempool_state_events(alice_node.local_mp_interface.get_mempool_state_event_stream());
     let miner_utxo_stream = miner.get_utxo_receiver_channel().fuse();
     runtime.spawn(miner.mine());
 

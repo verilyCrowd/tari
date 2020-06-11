@@ -21,7 +21,12 @@
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 use crate::{
-    base_node::{comms_interface::BlockEvent, generate_request_key, RequestKey, WaitingRequests},
+    base_node::{
+        comms_interface::{BlockEvent, BlockEventReceiver},
+        generate_request_key,
+        RequestKey,
+        WaitingRequests,
+    },
     chain_storage::BlockchainBackend,
     mempool::{
         proto,
@@ -48,14 +53,13 @@ use futures::{
 use log::*;
 use rand::rngs::OsRng;
 use std::{convert::TryInto, sync::Arc, time::Duration};
-use tari_broadcast_channel::Subscriber;
-use tari_comms::types::CommsPublicKey;
+use tari_comms::peer_manager::NodeId;
 use tari_comms_dht::{
     domain_message::OutboundDomainMessage,
     envelope::NodeDestination,
-    outbound::{OutboundEncryption, OutboundMessageRequester},
+    outbound::{DhtOutboundError, OutboundEncryption, OutboundMessageRequester},
 };
-use tari_crypto::{ristretto::RistrettoPublicKey, tari_utilities::hex::Hex};
+use tari_crypto::tari_utilities::hex::Hex;
 use tari_p2p::{domain_message::DomainMessage, tari_message::TariMessageType};
 use tari_service_framework::RequestContext;
 use tokio::task;
@@ -65,12 +69,12 @@ const LOG_TARGET: &str = "c::mempool::service::service";
 /// A convenience struct to hold all the Mempool service streams
 pub struct MempoolStreams<SOutReq, SInReq, SInRes, STxIn, SLocalReq> {
     outbound_request_stream: SOutReq,
-    outbound_tx_stream: UnboundedReceiver<(Transaction, Vec<CommsPublicKey>)>,
+    outbound_tx_stream: UnboundedReceiver<(Transaction, Vec<NodeId>)>,
     inbound_request_stream: SInReq,
     inbound_response_stream: SInRes,
     inbound_transaction_stream: STxIn,
     local_request_stream: SLocalReq,
-    block_event_stream: Subscriber<BlockEvent>,
+    block_event_stream: BlockEventReceiver,
 }
 
 impl<SOutReq, SInReq, SInRes, STxIn, SLocalReq> MempoolStreams<SOutReq, SInReq, SInRes, STxIn, SLocalReq>
@@ -83,12 +87,12 @@ where
 {
     pub fn new(
         outbound_request_stream: SOutReq,
-        outbound_tx_stream: UnboundedReceiver<(Transaction, Vec<CommsPublicKey>)>,
+        outbound_tx_stream: UnboundedReceiver<(Transaction, Vec<NodeId>)>,
         inbound_request_stream: SInReq,
         inbound_response_stream: SInRes,
         inbound_transaction_stream: STxIn,
         local_request_stream: SLocalReq,
-        block_event_stream: Subscriber<BlockEvent>,
+        block_event_stream: BlockEventReceiver,
     ) -> Self
     {
         Self {
@@ -173,8 +177,8 @@ where B: BlockchainBackend + 'static
                 },
 
                 // Outbound tx messages from the OutboundMempoolServiceInterface
-                outbound_tx_context = outbound_tx_stream.select_next_some() => {
-                    self.spawn_handle_outbound_tx(outbound_tx_context);
+                (txn, excluded_peers) = outbound_tx_stream.select_next_some() => {
+                    self.spawn_handle_outbound_tx(txn, excluded_peers);
                 },
 
                 // Incoming request messages from the Comms layer
@@ -199,7 +203,9 @@ where B: BlockchainBackend + 'static
 
                 // Block events from local Base Node.
                 block_event = block_event_stream.select_next_some() => {
-                    self.spawn_handle_block_event(block_event);
+                    if let Ok(block_event) = block_event {
+                        self.spawn_handle_block_event(block_event);
+                    }
                 },
 
                 // Timeout events for waiting requests
@@ -246,10 +252,9 @@ where B: BlockchainBackend + 'static
         });
     }
 
-    fn spawn_handle_outbound_tx(&self, tx_context: (Transaction, Vec<RistrettoPublicKey>)) {
+    fn spawn_handle_outbound_tx(&self, tx: Transaction, excluded_peers: Vec<NodeId>) {
         let outbound_message_service = self.outbound_message_service.clone();
         task::spawn(async move {
-            let (tx, excluded_peers) = tx_context;
             let _ = handle_outbound_tx(outbound_message_service, tx, excluded_peers)
                 .await
                 .or_else(|err| {
@@ -371,7 +376,6 @@ async fn handle_incoming_request<B: BlockchainBackend + 'static>(
     outbound_message_service
         .send_direct(
             origin_public_key,
-            OutboundEncryption::None,
             OutboundDomainMessage::new(TariMessageType::MempoolResponse, message),
         )
         .await?;
@@ -389,7 +393,7 @@ async fn handle_incoming_response(
         .and_then(|r| r.try_into().ok())
         .ok_or_else(|| MempoolServiceError::InvalidResponse("Received an invalid mempool response".to_string()))?;
 
-    if let Some(reply_tx) = waiting_requests.remove(request_key)? {
+    if let Some(reply_tx) = waiting_requests.remove(request_key).await {
         let _ = reply_tx.send(Ok(response).or_else(|resp| {
             warn!(
                 target: LOG_TARGET,
@@ -424,21 +428,17 @@ async fn handle_outbound_request(
             OutboundEncryption::None,
             OutboundDomainMessage::new(TariMessageType::MempoolRequest, service_request),
         )
-        .await
-        .or_else(|e| {
-            error!(target: LOG_TARGET, "mempool outbound request failure. {:?}", e);
-            Err(e)
-        })
-        .map_err(|e| MempoolServiceError::OutboundMessageService(e.to_string()))?;
+        .await;
 
-    match send_result.resolve_ok().await {
-        Some(send_states) if !send_states.is_empty() => {
+    match send_result {
+        Ok(_) => {
             // Spawn timeout and wait for matching response to arrive
-            waiting_requests.insert(request_key, Some(reply_tx))?;
+            waiting_requests.insert(request_key, Some(reply_tx)).await;
             // Spawn timeout for waiting_request
             spawn_request_timeout(timeout_sender, request_key, config.request_timeout);
+            Ok(())
         },
-        Some(_) => {
+        Err(DhtOutboundError::NoMessagesQueued) => {
             let _ = reply_tx.send(Err(MempoolServiceError::NoBootstrapNodesConfigured).or_else(|resp| {
                 error!(
                     target: LOG_TARGET,
@@ -446,21 +446,14 @@ async fn handle_outbound_request(
                 );
                 Err(resp)
             }));
+
+            Ok(())
         },
-        None => {
-            let _ = reply_tx
-                .send(Err(MempoolServiceError::BroadcastFailed))
-                .or_else(|resp| {
-                    error!(
-                        target: LOG_TARGET,
-                        "Failed to send outbound request because DHT outbound broadcast failed"
-                    );
-                    Err(resp)
-                });
+        Err(e) => {
+            error!(target: LOG_TARGET, "mempool outbound request failure. {:?}", e);
+            Err(MempoolServiceError::OutboundMessageService(e.to_string()))
         },
     }
-
-    Ok(())
 }
 
 async fn handle_incoming_tx<B: BlockchainBackend + 'static>(
@@ -482,7 +475,7 @@ async fn handle_incoming_tx<B: BlockchainBackend + 'static>(
         source_peer.public_key
     );
     inbound_handlers
-        .handle_transaction(&inner, Some(source_peer.public_key))
+        .handle_transaction(&inner, Some(source_peer.node_id))
         .await?;
 
     Ok(())
@@ -493,7 +486,7 @@ async fn handle_request_timeout(
     request_key: RequestKey,
 ) -> Result<(), MempoolServiceError>
 {
-    if let Some(reply_tx) = waiting_requests.remove(request_key)? {
+    if let Some(reply_tx) = waiting_requests.remove(request_key).await {
         let reply_msg = Err(MempoolServiceError::RequestTimedOut);
         let _ = reply_tx.send(reply_msg.or_else(|resp| {
             error!(
@@ -510,7 +503,7 @@ async fn handle_request_timeout(
 async fn handle_outbound_tx(
     mut outbound_message_service: OutboundMessageRequester,
     tx: Transaction,
-    exclude_peers: Vec<CommsPublicKey>,
+    exclude_peers: Vec<NodeId>,
 ) -> Result<(), MempoolServiceError>
 {
     outbound_message_service
@@ -535,7 +528,6 @@ async fn handle_block_event<B: BlockchainBackend + 'static>(
 ) -> Result<(), MempoolServiceError>
 {
     inbound_handlers.handle_block_event(block_event).await?;
-
     Ok(())
 }
 

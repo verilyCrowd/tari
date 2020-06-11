@@ -22,11 +22,13 @@
 
 use super::peer_message::PeerMessage;
 use futures::{task::Context, Future, Sink, SinkExt};
+use log::*;
 use std::{error::Error, pin::Pin, sync::Arc, task::Poll};
 use tari_comms::pipeline::PipelineError;
 use tari_comms_dht::{domain_message::MessageHeader, inbound::DecryptedDhtMessage};
 use tower::Service;
 
+const LOG_TARGET: &str = "comms::middleware::inbound_connector";
 /// This service receives DecryptedDhtMessage, deserializes the MessageHeader and
 /// sends a `PeerMessage` on the given sink.
 #[derive(Clone)]
@@ -59,7 +61,7 @@ where
     fn call(&mut self, msg: DecryptedDhtMessage) -> Self::Future {
         let mut sink = self.sink.clone();
         async move {
-            let peer_message = Self::do_peer_message(msg)?;
+            let peer_message = Self::construct_peer_message(msg)?;
             // If this fails there is something wrong with the sink and the pubsub middleware should not
             // continue
             sink.send(Arc::new(peer_message))
@@ -72,7 +74,7 @@ where
 }
 
 impl<TSink> InboundDomainConnector<TSink> {
-    fn do_peer_message(mut inbound_message: DecryptedDhtMessage) -> Result<PeerMessage, PipelineError> {
+    fn construct_peer_message(mut inbound_message: DecryptedDhtMessage) -> Result<PeerMessage, PipelineError> {
         let envelope_body = inbound_message
             .success_mut()
             .ok_or_else(|| "Message failed to decrypt")?;
@@ -99,7 +101,12 @@ impl<TSink> InboundDomainConnector<TSink> {
             dht_header,
             body: msg_bytes,
         };
-
+        trace!(
+            target: LOG_TARGET,
+            "Forwarding message {:?} to pubsub, Trace: {}",
+            inbound_message.tag,
+            &peer_message.dht_header.message_tag
+        );
         Ok(peer_message)
     }
 }
@@ -118,7 +125,7 @@ where
     }
 
     fn start_send(mut self: Pin<&mut Self>, item: DecryptedDhtMessage) -> Result<(), Self::Error> {
-        let item = Self::do_peer_message(item)?;
+        let item = Self::construct_peer_message(item)?;
         Pin::new(&mut self.sink)
             .start_send(Arc::new(item))
             .map_err(PipelineError::from_debug)

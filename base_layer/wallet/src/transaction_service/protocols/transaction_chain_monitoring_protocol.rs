@@ -33,7 +33,7 @@ use futures::{channel::mpsc::Receiver, FutureExt, StreamExt};
 use log::*;
 use std::{convert::TryFrom, sync::Arc, time::Duration};
 use tari_comms::types::CommsPublicKey;
-use tari_comms_dht::{domain_message::OutboundDomainMessage, outbound::OutboundEncryption};
+use tari_comms_dht::domain_message::OutboundDomainMessage;
 use tari_core::{
     base_node::proto::{
         base_node as BaseNodeProto,
@@ -177,7 +177,6 @@ where TBackend: TransactionBackend + Clone + 'static
                 .outbound_message_service
                 .send_direct(
                     self.base_node_public_key.clone(),
-                    OutboundEncryption::None,
                     OutboundDomainMessage::new(TariMessageType::MempoolRequest, mempool_request.clone()),
                 )
                 .await
@@ -193,32 +192,25 @@ where TBackend: TransactionBackend + Clone + 'static
                 .outbound_message_service
                 .send_direct(
                     self.base_node_public_key.clone(),
-                    OutboundEncryption::None,
                     OutboundDomainMessage::new(TariMessageType::BaseNodeRequest, service_request),
                 )
                 .await
                 .map_err(|e| TransactionServiceProtocolError::new(self.id, TransactionServiceError::from(e)))?;
 
             let mut delay = delay_for(self.timeout).fuse();
-            let mut received_mempool_response = false;
-            let mut received_base_node_response = false;
+            let mut received_mempool_response = None;
+            let mut mempool_response_received = false;
+            let mut base_node_response_received = false;
             // Loop until both a Mempool response AND a Base node response is received OR the Timeout expires.
             loop {
                 futures::select! {
                     mempool_response = mempool_response_receiver.select_next_some() => {
-                        if !self
-                        .handle_mempool_response(completed_tx.tx_id, mempool_response)
-                        .await?
-                        {
-                            return Err(TransactionServiceProtocolError::new(
-                                self.id,
-                                TransactionServiceError::MempoolRejection,
-                            ));
-                        }
-                        received_mempool_response = true;
-
+                        //We must first check the Base Node response before checking the mempool repsonse so we will keep it for the end of the round
+                        received_mempool_response = Some(mempool_response);
+                        mempool_response_received = true;
                     },
                     base_node_response = base_node_response_receiver.select_next_some() => {
+                        //We can immediately check the Base Node Response
                         if self
                         .handle_base_node_response(completed_tx.tx_id, base_node_response)
                         .await?
@@ -226,20 +218,33 @@ where TBackend: TransactionBackend + Clone + 'static
                             // Tx is mined!
                             return Ok(self.id);
                         }
-                        received_base_node_response = true;
+                        base_node_response_received = true;
                     },
                     () = delay => {
                         break;
                     },
                 }
 
-                // If we have received both responses from this round we can stop waiting for more responses
-                if received_mempool_response && received_base_node_response {
+                // If we have received both responses from this round we can check the mempool status and then continue
+                // to next round
+                if received_mempool_response.is_some() && base_node_response_received {
+                    if let Some(mempool_response) = received_mempool_response {
+                        if !self
+                            .handle_mempool_response(completed_tx.tx_id, mempool_response)
+                            .await?
+                        {
+                            return Err(TransactionServiceProtocolError::new(
+                                self.id,
+                                TransactionServiceError::MempoolRejection,
+                            ));
+                        }
+                    }
+
                     break;
                 }
             }
 
-            if received_mempool_response && received_base_node_response {
+            if mempool_response_received && base_node_response_received {
                 info!(
                     target: LOG_TARGET,
                     "Base node and Mempool response received. TxId: {:?} not mined yet.", completed_tx.tx_id,
@@ -301,6 +306,8 @@ where TBackend: TransactionBackend + Clone + 'static
                         ));
                     },
                 };
+
+                #[allow(clippy::single_match)]
                 match completed_tx.status {
                     TransactionStatus::Broadcast => match ts {
                         // Getting this response means the Mempool Rejected this transaction so it will be

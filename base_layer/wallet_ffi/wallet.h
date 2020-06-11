@@ -71,6 +71,8 @@ struct TariPendingInboundTransaction;
 
 struct TariTransportType;
 
+struct TariSeedWords;
+
 /// -------------------------------- Transport Types ----------------------------------------------- ///
 
 // Creates a memory transport type
@@ -156,6 +158,16 @@ struct TariPrivateKey *private_key_from_hex(const char *hex,int* error_out);
 
 // Frees memory for a TariPrivateKey
 void private_key_destroy(struct TariPrivateKey *pk);
+
+/// -------------------------------- Seed Words  -------------------------------------------------- ///
+// Get the number of seed words in the provided collection
+unsigned int seed_words_get_length(struct TariSeedWords *seed_words, int* error_out);
+
+// Get a seed word from the provided collection at the specified position
+char *seed_words_get_at(struct TariSeedWords *seed_words, unsigned int position, int* error_out);
+
+// Frees the memory for a TariSeedWords collection
+void seed_words_destroy(truct TariSeedWords *seed_words);
 
 /// -------------------------------- Contact ------------------------------------------------------ ///
 
@@ -342,7 +354,7 @@ struct TariWallet *wallet_create(struct TariWalletConfig *config,
                                     void (*callback_transaction_mined)(struct TariCompletedTransaction*),
                                     void (*callback_direct_send_result)(unsigned long long, bool),
                                     void (*callback_store_and_forward_send_result)(unsigned long long, bool),
-                                    void (*callback_transaction_cancellation)(unsigned long long),
+                                    void (*callback_transaction_cancellation)(struct TariCompletedTransaction*),
                                     void (*callback_base_node_sync_complete)(unsigned long long, bool),
                                     int* error_out);
 
@@ -391,6 +403,9 @@ struct TariPublicKey *wallet_get_public_key(struct TariWallet *wallet,int* error
 // Get the TariPendingInboundTransactions from a TariWallet
 struct TariPendingInboundTransactions *wallet_get_pending_inbound_transactions(struct TariWallet *wallet,int* error_out);
 
+// Get all cancelled transactions from a TariWallet
+struct TariCompletedTransactions *wallet_get_cancelled_transactions(struct TariWallet *wallet,int* error_out);
+
 // Get the TariCompletedTransaction from a TariWallet by its TransactionId
 struct TariCompletedTransaction *wallet_get_completed_transaction_by_id(struct TariWallet *wallet, unsigned long long transaction_id,int* error_out);
 
@@ -399,6 +414,9 @@ struct TariPendingOutboundTransaction *wallet_get_pending_outbound_transaction_b
 
 // Get the TariPendingInboundTransaction from a TariWallet by its TransactionId
 struct TariPendingInboundTransaction *wallet_get_pending_inbound_transaction_by_id(struct TariWallet *wallet, unsigned long long transaction_id,int* error_out);
+
+// Get a Cancelled transaction from a TariWallet by its TransactionId. Pending Inbound or Outbound transaction will be converted to a CompletedTransaction
+struct TariCompletedTransaction *wallet_get_cancelled_transaction_by_id(struct TariWallet *wallet, unsigned long long transaction_id, int* error_out);
 
 // Simulates completion of a TariPendingOutboundTransaction
 bool wallet_test_complete_sent_transaction(struct TariWallet *wallet, struct TariPendingOutboundTransaction *tx,int* error_out);
@@ -429,8 +447,17 @@ bool wallet_test_receive_transaction(struct TariWallet *wallet,int* error_out);
 /// Cancel a Pending Outbound Transaction
 bool wallet_cancel_pending_transaction(struct TariWallet *wallet, unsigned long long transaction_id, int* error_out);
 
+/// Perform a coin split
+unsigned long long wallet_coin_split(struct TariWallet *wallet, unsigned long long amount, unsigned long long count, unsigned long long fee, const char* msg, unsigned long long lock_height, int* error_out);
+
+/// Get the seed words representing the seed private key of the provided TariWallet
+struct TariSeedWords *wallet_get_seed_words(struct TariWallet *wallet, int* error_out);
+
 // Frees memory for a TariWallet
 void wallet_destroy(struct TariWallet *wallet);
+
+/// This function will log the provided string at debug level. To be used to have a client log messages to the LibWallet
+void log_debug_message(const char* msg);
 
 #ifdef __cplusplus
 }

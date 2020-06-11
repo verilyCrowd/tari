@@ -29,7 +29,10 @@ use crate::{
     },
 };
 use serde::{Deserialize, Serialize};
-use std::fmt::{Display, Error, Formatter};
+use std::{
+    convert::TryFrom,
+    fmt::{Display, Error, Formatter},
+};
 use strum_macros::Display;
 use tari_crypto::tari_utilities::{hex::to_hex, Hashable};
 
@@ -167,6 +170,16 @@ impl DbTransaction {
         self.operations
             .push(WriteOperation::RewindMmr(MmrTree::RangeProof, steps_back));
     }
+
+    /// Merge checkpoints to ensure that only a specific number of checkpoints remain.
+    pub fn merge_checkpoints(&mut self, max_cp_count: usize) {
+        self.operations
+            .push(WriteOperation::MergeMmrCheckpoints(MmrTree::Kernel, max_cp_count));
+        self.operations
+            .push(WriteOperation::MergeMmrCheckpoints(MmrTree::Utxo, max_cp_count));
+        self.operations
+            .push(WriteOperation::MergeMmrCheckpoints(MmrTree::RangeProof, max_cp_count));
+    }
 }
 
 #[derive(Debug, Display)]
@@ -177,6 +190,7 @@ pub enum WriteOperation {
     UnSpend(DbKey),
     CreateMmrCheckpoint(MmrTree),
     RewindMmr(MmrTree, usize),
+    MergeMmrCheckpoints(MmrTree, usize),
 }
 
 /// A list of key-value pairs that are required for each insert operation
@@ -274,6 +288,19 @@ impl Display for MmrTree {
             MmrTree::RangeProof => f.write_str("Range Proof"),
             MmrTree::Utxo => f.write_str("UTXO"),
             MmrTree::Kernel => f.write_str("Kernel"),
+        }
+    }
+}
+
+impl TryFrom<i32> for MmrTree {
+    type Error = String;
+
+    fn try_from(v: i32) -> Result<Self, Self::Error> {
+        match v {
+            0 => Ok(MmrTree::Utxo),
+            1 => Ok(MmrTree::Kernel),
+            2 => Ok(MmrTree::RangeProof),
+            _ => Err("Invalid MmrTree".into()),
         }
     }
 }

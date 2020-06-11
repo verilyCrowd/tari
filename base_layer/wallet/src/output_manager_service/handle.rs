@@ -31,7 +31,7 @@ use tari_broadcast_channel::Subscriber;
 use tari_comms::types::CommsPublicKey;
 use tari_core::transactions::{
     tari_amount::MicroTari,
-    transaction::{TransactionInput, TransactionOutput, UnblindedOutput},
+    transaction::{Transaction, TransactionInput, TransactionOutput, UnblindedOutput},
     types::PrivateKey,
     SenderTransactionProtocol,
 };
@@ -44,7 +44,6 @@ pub enum OutputManagerRequest {
     GetBalance,
     AddOutput(UnblindedOutput),
     GetRecipientKey((u64, MicroTari)),
-    GetCoinbaseKey((u64, MicroTari, u64)),
     ConfirmPendingTransaction(u64),
     ConfirmTransaction((u64, Vec<TransactionInput>, Vec<TransactionOutput>)),
     PrepareToSendTransaction((MicroTari, MicroTari, Option<u64>, String)),
@@ -57,6 +56,7 @@ pub enum OutputManagerRequest {
     GetSeedWords,
     SetBaseNodePublicKey(CommsPublicKey),
     SyncWithBaseNode,
+    CreateCoinSplit((MicroTari, usize, MicroTari, Option<u64>)),
 }
 
 impl fmt::Display for OutputManagerRequest {
@@ -65,7 +65,6 @@ impl fmt::Display for OutputManagerRequest {
             Self::GetBalance => f.write_str("GetBalance"),
             Self::AddOutput(v) => f.write_str(&format!("AddOutput ({})", v.value)),
             Self::GetRecipientKey(v) => f.write_str(&format!("GetRecipientKey ({})", v.0)),
-            Self::GetCoinbaseKey(v) => f.write_str(&format!("GetCoinbaseKey ({})", v.0)),
             Self::ConfirmTransaction(v) => f.write_str(&format!("ConfirmTransaction ({})", v.0)),
             Self::ConfirmPendingTransaction(v) => f.write_str(&format!("ConfirmPendingTransaction ({})", v)),
             Self::PrepareToSendTransaction((_, _, _, msg)) => {
@@ -80,6 +79,7 @@ impl fmt::Display for OutputManagerRequest {
             Self::GetSeedWords => f.write_str("GetSeedWords"),
             Self::SetBaseNodePublicKey(k) => f.write_str(&format!("SetBaseNodePublicKey ({})", k)),
             Self::SyncWithBaseNode => f.write_str("SyncWithBaseNode"),
+            Self::CreateCoinSplit(v) => f.write_str(&format!("CreateCoinSplit ({})", v.0)),
         }
     }
 }
@@ -102,6 +102,7 @@ pub enum OutputManagerResponse {
     SeedWords(Vec<String>),
     BaseNodePublicKeySet,
     StartedBaseNodeSync(u64),
+    Transaction((u64, Transaction, MicroTari, MicroTari)),
 }
 
 /// Events that can be published on the Text Message Service Event Stream
@@ -154,23 +155,6 @@ impl OutputManagerHandle {
         match self
             .handle
             .call(OutputManagerRequest::GetRecipientKey((tx_id, amount)))
-            .await??
-        {
-            OutputManagerResponse::RecipientKeyGenerated(k) => Ok(k),
-            _ => Err(OutputManagerError::UnexpectedApiResponse),
-        }
-    }
-
-    pub async fn get_coinbase_spending_key(
-        &mut self,
-        tx_id: u64,
-        amount: MicroTari,
-        maturity_height: u64,
-    ) -> Result<PrivateKey, OutputManagerError>
-    {
-        match self
-            .handle
-            .call(OutputManagerRequest::GetCoinbaseKey((tx_id, amount, maturity_height)))
             .await??
         {
             OutputManagerResponse::RecipientKeyGenerated(k) => Ok(k),
@@ -306,6 +290,29 @@ impl OutputManagerHandle {
     pub async fn sync_with_base_node(&mut self) -> Result<u64, OutputManagerError> {
         match self.handle.call(OutputManagerRequest::SyncWithBaseNode).await?? {
             OutputManagerResponse::StartedBaseNodeSync(request_key) => Ok(request_key),
+            _ => Err(OutputManagerError::UnexpectedApiResponse),
+        }
+    }
+
+    pub async fn create_coin_split(
+        &mut self,
+        amount_per_split: MicroTari,
+        split_count: usize,
+        fee_per_gram: MicroTari,
+        lock_height: Option<u64>,
+    ) -> Result<(u64, Transaction, MicroTari, MicroTari), OutputManagerError>
+    {
+        match self
+            .handle
+            .call(OutputManagerRequest::CreateCoinSplit((
+                amount_per_split,
+                split_count,
+                fee_per_gram,
+                lock_height,
+            )))
+            .await??
+        {
+            OutputManagerResponse::Transaction(ct) => Ok(ct),
             _ => Err(OutputManagerError::UnexpectedApiResponse),
         }
     }

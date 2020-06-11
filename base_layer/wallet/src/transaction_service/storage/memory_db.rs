@@ -31,7 +31,6 @@ use crate::{
             DbValue,
             InboundTransaction,
             OutboundTransaction,
-            PendingCoinbaseTransaction,
             TransactionBackend,
             TransactionStatus,
             WriteOperation,
@@ -44,12 +43,12 @@ use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
 };
+use tari_comms::types::CommsPublicKey;
 
 #[derive(Default)]
 struct InnerDatabase {
     pending_outbound_transactions: HashMap<TxId, OutboundTransaction>,
     pending_inbound_transactions: HashMap<TxId, InboundTransaction>,
-    pending_coinbase_transactions: HashMap<TxId, PendingCoinbaseTransaction>,
     completed_transactions: HashMap<TxId, CompletedTransaction>,
 }
 
@@ -58,7 +57,6 @@ impl InnerDatabase {
         Self {
             pending_outbound_transactions: HashMap::new(),
             pending_inbound_transactions: HashMap::new(),
-            pending_coinbase_transactions: HashMap::new(),
             completed_transactions: HashMap::new(),
         }
     }
@@ -76,7 +74,7 @@ impl TransactionMemoryDatabase {
         }
     }
 }
-
+#[allow(clippy::cognitive_complexity)]
 impl TransactionBackend for TransactionMemoryDatabase {
     fn fetch(&self, key: &DbKey) -> Result<Option<DbValue>, TransactionStorageError> {
         let db = acquire_read_lock!(self.db);
@@ -84,7 +82,7 @@ impl TransactionBackend for TransactionMemoryDatabase {
             DbKey::PendingOutboundTransaction(t) => {
                 let mut result = None;
                 if let Some(v) = db.pending_outbound_transactions.get(t) {
-                    if v.status != TransactionStatus::Cancelled {
+                    if !v.cancelled {
                         result = Some(DbValue::PendingOutboundTransaction(Box::new(v.clone())));
                     }
                 }
@@ -93,7 +91,7 @@ impl TransactionBackend for TransactionMemoryDatabase {
             DbKey::PendingInboundTransaction(t) => {
                 let mut result = None;
                 if let Some(v) = db.pending_inbound_transactions.get(t) {
-                    if v.status != TransactionStatus::Cancelled {
+                    if !v.cancelled {
                         result = Some(DbValue::PendingInboundTransaction(Box::new(v.clone())));
                     }
                 }
@@ -102,22 +100,18 @@ impl TransactionBackend for TransactionMemoryDatabase {
             DbKey::CompletedTransaction(t) => {
                 let mut result = None;
                 if let Some(v) = db.completed_transactions.get(t) {
-                    if v.status != TransactionStatus::Cancelled {
+                    if !v.cancelled {
                         result = Some(DbValue::CompletedTransaction(Box::new(v.clone())));
                     }
                 }
                 result
             },
-            DbKey::PendingCoinbaseTransaction(t) => db
-                .pending_coinbase_transactions
-                .get(t)
-                .map(|v| DbValue::PendingCoinbaseTransaction(Box::new(v.clone()))),
             DbKey::PendingOutboundTransactions => {
                 // Filter out cancelled transactions
                 let mut result = HashMap::new();
                 for (k, v) in db.pending_outbound_transactions.iter() {
-                    if v.status != TransactionStatus::Cancelled {
-                        result.insert(k.clone(), v.clone());
+                    if !v.cancelled {
+                        result.insert(*k, v.clone());
                     }
                 }
                 Some(DbValue::PendingOutboundTransactions(result))
@@ -126,24 +120,77 @@ impl TransactionBackend for TransactionMemoryDatabase {
                 // Filter out cancelled transactions
                 let mut result = HashMap::new();
                 for (k, v) in db.pending_inbound_transactions.iter() {
-                    if v.status != TransactionStatus::Cancelled {
-                        result.insert(k.clone(), v.clone());
+                    if !v.cancelled {
+                        result.insert(*k, v.clone());
                     }
                 }
                 Some(DbValue::PendingInboundTransactions(result))
             },
-            DbKey::PendingCoinbaseTransactions => Some(DbValue::PendingCoinbaseTransactions(
-                db.pending_coinbase_transactions.clone(),
-            )),
             DbKey::CompletedTransactions => {
                 // Filter out cancelled transactions
                 let mut result = HashMap::new();
                 for (k, v) in db.completed_transactions.iter() {
-                    if v.status != TransactionStatus::Cancelled {
+                    if !v.cancelled {
+                        result.insert(*k, v.clone());
+                    }
+                }
+                Some(DbValue::CompletedTransactions(result))
+            },
+            DbKey::CancelledPendingOutboundTransactions => {
+                // Filter out cancelled transactions
+                let mut result = HashMap::new();
+                for (k, v) in db.pending_outbound_transactions.iter() {
+                    if v.cancelled {
+                        result.insert(*k, v.clone());
+                    }
+                }
+                Some(DbValue::PendingOutboundTransactions(result))
+            },
+            DbKey::CancelledPendingInboundTransactions => {
+                // Filter out cancelled transactions
+                let mut result = HashMap::new();
+                for (k, v) in db.pending_inbound_transactions.iter() {
+                    if v.cancelled {
+                        result.insert(*k, v.clone());
+                    }
+                }
+                Some(DbValue::PendingInboundTransactions(result))
+            },
+            DbKey::CancelledCompletedTransactions => {
+                let mut result = HashMap::new();
+                for (k, v) in db.completed_transactions.iter() {
+                    if v.cancelled {
                         result.insert(k.clone(), v.clone());
                     }
                 }
                 Some(DbValue::CompletedTransactions(result))
+            },
+            DbKey::CancelledPendingOutboundTransaction(t) => {
+                let mut result = None;
+                if let Some(v) = db.pending_outbound_transactions.get(t) {
+                    if v.cancelled {
+                        result = Some(DbValue::PendingOutboundTransaction(Box::new(v.clone())));
+                    }
+                }
+                result
+            },
+            DbKey::CancelledPendingInboundTransaction(t) => {
+                let mut result = None;
+                if let Some(v) = db.pending_inbound_transactions.get(t) {
+                    if v.cancelled {
+                        result = Some(DbValue::PendingInboundTransaction(Box::new(v.clone())));
+                    }
+                }
+                result
+            },
+            DbKey::CancelledCompletedTransaction(t) => {
+                let mut result = None;
+                if let Some(v) = db.completed_transactions.get(t) {
+                    if v.cancelled {
+                        result = Some(DbValue::CompletedTransaction(Box::new(v.clone())));
+                    }
+                }
+                result
             },
         };
 
@@ -153,14 +200,26 @@ impl TransactionBackend for TransactionMemoryDatabase {
     fn contains(&self, key: &DbKey) -> Result<bool, TransactionStorageError> {
         let db = acquire_read_lock!(self.db);
         let result = match key {
-            DbKey::PendingOutboundTransaction(k) => db.pending_outbound_transactions.contains_key(k),
-            DbKey::PendingInboundTransaction(k) => db.pending_inbound_transactions.contains_key(k),
-            DbKey::CompletedTransaction(k) => db.completed_transactions.contains_key(k),
-            DbKey::PendingCoinbaseTransaction(k) => db.pending_coinbase_transactions.contains_key(k),
+            DbKey::PendingOutboundTransaction(k) => {
+                db.pending_outbound_transactions.get(k).map_or(false, |v| !v.cancelled)
+            },
+            DbKey::PendingInboundTransaction(k) => {
+                db.pending_inbound_transactions.get(k).map_or(false, |v| !v.cancelled)
+            },
+            DbKey::CompletedTransaction(k) => db.completed_transactions.get(k).map_or(false, |v| !v.cancelled),
             DbKey::PendingOutboundTransactions => false,
             DbKey::PendingInboundTransactions => false,
             DbKey::CompletedTransactions => false,
-            DbKey::PendingCoinbaseTransactions => false,
+            DbKey::CancelledPendingOutboundTransactions => false,
+            DbKey::CancelledPendingInboundTransactions => false,
+            DbKey::CancelledCompletedTransactions => false,
+            DbKey::CancelledPendingOutboundTransaction(k) => {
+                db.pending_outbound_transactions.get(k).map_or(false, |v| v.cancelled)
+            },
+            DbKey::CancelledPendingInboundTransaction(k) => {
+                db.pending_inbound_transactions.get(k).map_or(false, |v| v.cancelled)
+            },
+            DbKey::CancelledCompletedTransaction(k) => db.completed_transactions.get(k).map_or(false, |v| v.cancelled),
         };
 
         Ok(result)
@@ -182,13 +241,6 @@ impl TransactionBackend for TransactionMemoryDatabase {
                     }
                     db.pending_inbound_transactions.insert(k, *v);
                 },
-                DbKeyValuePair::PendingCoinbaseTransaction(k, v) => {
-                    if db.pending_coinbase_transactions.contains_key(&k) {
-                        return Err(TransactionStorageError::DuplicateOutput);
-                    }
-                    db.pending_coinbase_transactions.insert(k, *v);
-                },
-
                 DbKeyValuePair::CompletedTransaction(k, v) => {
                     if db.completed_transactions.contains_key(&k) {
                         return Err(TransactionStorageError::DuplicateOutput);
@@ -197,7 +249,7 @@ impl TransactionBackend for TransactionMemoryDatabase {
                 },
             },
             WriteOperation::Remove(k) => match k {
-                DbKey::PendingOutboundTransaction(k) => {
+                DbKey::PendingOutboundTransaction(k) | DbKey::CancelledPendingOutboundTransaction(k) => {
                     if let Some(p) = db.pending_outbound_transactions.remove(&k) {
                         return Ok(Some(DbValue::PendingOutboundTransaction(Box::new(p))));
                     } else {
@@ -206,7 +258,7 @@ impl TransactionBackend for TransactionMemoryDatabase {
                         ));
                     }
                 },
-                DbKey::PendingInboundTransaction(k) => {
+                DbKey::PendingInboundTransaction(k) | DbKey::CancelledPendingInboundTransaction(k) => {
                     if let Some(p) = db.pending_inbound_transactions.remove(&k) {
                         return Ok(Some(DbValue::PendingInboundTransaction(Box::new(p))));
                     } else {
@@ -215,16 +267,7 @@ impl TransactionBackend for TransactionMemoryDatabase {
                         ));
                     }
                 },
-                DbKey::PendingCoinbaseTransaction(k) => {
-                    if let Some(p) = db.pending_coinbase_transactions.remove(&k) {
-                        return Ok(Some(DbValue::PendingCoinbaseTransaction(Box::new(p))));
-                    } else {
-                        return Err(TransactionStorageError::ValueNotFound(
-                            DbKey::PendingCoinbaseTransaction(k),
-                        ));
-                    }
-                },
-                DbKey::CompletedTransaction(k) => {
+                DbKey::CompletedTransaction(k) | DbKey::CancelledCompletedTransaction(k) => {
                     if let Some(p) = db.completed_transactions.remove(&k) {
                         return Ok(Some(DbValue::CompletedTransaction(Box::new(p))));
                     } else {
@@ -234,7 +277,13 @@ impl TransactionBackend for TransactionMemoryDatabase {
                 DbKey::PendingInboundTransactions => return Err(TransactionStorageError::OperationNotSupported),
                 DbKey::PendingOutboundTransactions => return Err(TransactionStorageError::OperationNotSupported),
                 DbKey::CompletedTransactions => return Err(TransactionStorageError::OperationNotSupported),
-                DbKey::PendingCoinbaseTransactions => return Err(TransactionStorageError::OperationNotSupported),
+                DbKey::CancelledPendingOutboundTransactions => {
+                    return Err(TransactionStorageError::OperationNotSupported)
+                },
+                DbKey::CancelledPendingInboundTransactions => {
+                    return Err(TransactionStorageError::OperationNotSupported)
+                },
+                DbKey::CancelledCompletedTransactions => return Err(TransactionStorageError::OperationNotSupported),
             },
         }
 
@@ -246,8 +295,22 @@ impl TransactionBackend for TransactionMemoryDatabase {
 
         Ok(db.pending_outbound_transactions.contains_key(&tx_id) ||
             db.pending_inbound_transactions.contains_key(&tx_id) ||
-            db.pending_coinbase_transactions.contains_key(&tx_id) ||
             db.completed_transactions.contains_key(&tx_id))
+    }
+
+    fn get_pending_transaction_counterparty_pub_key_by_tx_id(
+        &self,
+        tx_id: u64,
+    ) -> Result<CommsPublicKey, TransactionStorageError>
+    {
+        let db = acquire_read_lock!(self.db);
+
+        if let Some(pending_inbound_tx) = db.pending_inbound_transactions.get(&tx_id) {
+            return Ok(pending_inbound_tx.source_public_key.clone());
+        } else if let Some(pending_outbound_tx) = db.pending_outbound_transactions.get(&tx_id) {
+            return Ok(pending_outbound_tx.destination_public_key.clone());
+        }
+        Err(TransactionStorageError::ValuesNotFound)
     }
 
     fn complete_outbound_transaction(
@@ -292,26 +355,6 @@ impl TransactionBackend for TransactionMemoryDatabase {
         Ok(())
     }
 
-    fn complete_coinbase_transaction(
-        &self,
-        tx_id: u64,
-        completed_transaction: CompletedTransaction,
-    ) -> Result<(), TransactionStorageError>
-    {
-        let mut db = acquire_write_lock!(self.db);
-
-        if db.completed_transactions.contains_key(&tx_id) {
-            return Err(TransactionStorageError::TransactionAlreadyExists);
-        }
-        let _ = db
-            .pending_coinbase_transactions
-            .remove(&tx_id)
-            .ok_or_else(|| TransactionStorageError::ValueNotFound(DbKey::PendingCoinbaseTransaction(tx_id)))?;
-
-        db.completed_transactions.insert(tx_id, completed_transaction);
-        Ok(())
-    }
-
     fn broadcast_completed_transaction(&self, tx_id: TxId) -> Result<(), TransactionStorageError> {
         let mut db = acquire_write_lock!(self.db);
 
@@ -335,7 +378,7 @@ impl TransactionBackend for TransactionMemoryDatabase {
             .get_mut(&tx_id)
             .ok_or_else(|| TransactionStorageError::ValueNotFound(DbKey::CompletedTransaction(tx_id)))?;
 
-        if completed_tx.status == TransactionStatus::Cancelled {
+        if completed_tx.cancelled {
             return Err(TransactionStorageError::ValueNotFound(DbKey::CompletedTransaction(
                 tx_id,
             )));
@@ -354,7 +397,7 @@ impl TransactionBackend for TransactionMemoryDatabase {
             .get_mut(&tx_id)
             .ok_or_else(|| TransactionStorageError::ValueNotFound(DbKey::CompletedTransaction(tx_id)))?;
 
-        completed_tx.status = TransactionStatus::Cancelled;
+        completed_tx.cancelled = true;
 
         Ok(())
     }
@@ -364,11 +407,28 @@ impl TransactionBackend for TransactionMemoryDatabase {
 
         if db.pending_inbound_transactions.contains_key(&tx_id) {
             if let Some(inbound) = db.pending_inbound_transactions.get_mut(&tx_id) {
-                inbound.status = TransactionStatus::Cancelled;
+                inbound.cancelled = true;
             }
         } else if db.pending_outbound_transactions.contains_key(&tx_id) {
             if let Some(outbound) = db.pending_outbound_transactions.get_mut(&tx_id) {
-                outbound.status = TransactionStatus::Cancelled;
+                outbound.cancelled = true;
+            }
+        } else {
+            return Err(TransactionStorageError::ValuesNotFound);
+        }
+        Ok(())
+    }
+
+    fn mark_direct_send_success(&self, tx_id: u64) -> Result<(), TransactionStorageError> {
+        let mut db = acquire_write_lock!(self.db);
+
+        if db.pending_inbound_transactions.contains_key(&tx_id) {
+            if let Some(inbound) = db.pending_inbound_transactions.get_mut(&tx_id) {
+                inbound.direct_send_success = true;
+            }
+        } else if db.pending_outbound_transactions.contains_key(&tx_id) {
+            if let Some(outbound) = db.pending_outbound_transactions.get_mut(&tx_id) {
+                outbound.direct_send_success = true;
             }
         } else {
             return Err(TransactionStorageError::ValuesNotFound);

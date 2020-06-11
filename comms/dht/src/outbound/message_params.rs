@@ -27,10 +27,7 @@ use crate::{
     proto::envelope::DhtMessageType,
 };
 use std::{fmt, fmt::Display};
-use tari_comms::{
-    peer_manager::{NodeId, PeerFeatures},
-    types::CommsPublicKey,
-};
+use tari_comms::{peer_manager::NodeId, types::CommsPublicKey};
 
 /// Configuration for outbound messages.
 ///
@@ -80,7 +77,7 @@ impl Default for FinalSendMessageParams {
             dht_message_type: Default::default(),
             dht_message_flags: Default::default(),
             force_origin: false,
-            is_discovery_enabled: true,
+            is_discovery_enabled: false,
             dht_header: None,
         }
     }
@@ -115,32 +112,37 @@ impl SendMessageParams {
 
     /// Set broadcast_strategy to Closest.`excluded_peers` are excluded. Only Peers which have all `features` are
     /// included.
-    pub fn closest(
-        &mut self,
-        node_id: NodeId,
-        n: usize,
-        excluded_peers: Vec<CommsPublicKey>,
-        peer_features: PeerFeatures,
-    ) -> &mut Self
-    {
+    pub fn closest(&mut self, node_id: NodeId, n: usize, excluded_peers: Vec<NodeId>) -> &mut Self {
         self.params_mut().broadcast_strategy = BroadcastStrategy::Closest(Box::new(BroadcastClosestRequest {
             excluded_peers,
             node_id,
-            peer_features,
             n,
+            connected_only: false,
+        }));
+        self
+    }
+
+    /// Set broadcast_strategy to Closest.`excluded_peers` are excluded. Only Peers which have all `features` are
+    /// included.
+    pub fn closest_connected(&mut self, node_id: NodeId, n: usize, excluded_peers: Vec<NodeId>) -> &mut Self {
+        self.params_mut().broadcast_strategy = BroadcastStrategy::Closest(Box::new(BroadcastClosestRequest {
+            excluded_peers,
+            node_id,
+            n,
+            connected_only: true,
         }));
         self
     }
 
     /// Set broadcast_strategy to Neighbours. `excluded_peers` are excluded. Only Peers that have
     /// `PeerFeatures::MESSAGE_PROPAGATION` are included.
-    pub fn neighbours(&mut self, excluded_peers: Vec<CommsPublicKey>) -> &mut Self {
-        self.params_mut().broadcast_strategy = BroadcastStrategy::Neighbours(excluded_peers, false);
+    pub fn broadcast(&mut self, excluded_peers: Vec<NodeId>) -> &mut Self {
+        self.params_mut().broadcast_strategy = BroadcastStrategy::Broadcast(excluded_peers);
         self
     }
 
-    pub fn neighbours_include_clients(&mut self, excluded_peers: Vec<CommsPublicKey>) -> &mut Self {
-        self.params_mut().broadcast_strategy = BroadcastStrategy::Neighbours(excluded_peers, true);
+    pub fn propagate(&mut self, destination: NodeDestination, excluded_peers: Vec<NodeId>) -> &mut Self {
+        self.params_mut().broadcast_strategy = BroadcastStrategy::Propagate(destination, excluded_peers);
         self
     }
 
@@ -150,9 +152,9 @@ impl SendMessageParams {
         self
     }
 
-    /// Set broadcast_strategy to Random
+    /// Set broadcast_strategy to Random.
     pub fn random(&mut self, n: usize) -> &mut Self {
-        self.params_mut().broadcast_strategy = BroadcastStrategy::Random(n);
+        self.params_mut().broadcast_strategy = BroadcastStrategy::Random(n, vec![]);
         self
     }
 

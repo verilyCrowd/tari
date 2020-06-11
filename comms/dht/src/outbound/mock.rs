@@ -20,12 +20,15 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use crate::outbound::{
-    message::SendMessageResponse,
-    message_params::FinalSendMessageParams,
-    message_send_state::MessageSendState,
-    DhtOutboundRequest,
-    OutboundMessageRequester,
+use crate::{
+    broadcast_strategy::BroadcastStrategy,
+    outbound::{
+        message::{SendFailure, SendMessageResponse},
+        message_params::FinalSendMessageParams,
+        message_send_state::MessageSendState,
+        DhtOutboundRequest,
+        OutboundMessageRequester,
+    },
 };
 use bytes::Bytes;
 use futures::{
@@ -33,11 +36,15 @@ use futures::{
     stream::Fuse,
     StreamExt,
 };
+use log::*;
 use std::{
     sync::{Arc, Condvar, Mutex, RwLock},
     time::Duration,
 };
 use tari_comms::message::MessageTag;
+use tokio::time::delay_for;
+
+const LOG_TARGET: &str = "mock::outbound_requester";
 
 /// Creates a mock outbound request "handler" for testing purposes.
 ///
@@ -53,6 +60,7 @@ pub struct OutboundServiceMockState {
     calls: Arc<Mutex<Vec<(FinalSendMessageParams, Bytes)>>>,
     next_response: Arc<RwLock<Option<SendMessageResponse>>>,
     call_count_cond_var: Arc<Condvar>,
+    behaviour: Arc<Mutex<MockBehaviour>>,
 }
 
 impl OutboundServiceMockState {
@@ -61,6 +69,7 @@ impl OutboundServiceMockState {
             calls: Arc::new(Mutex::new(Vec::new())),
             next_response: Arc::new(RwLock::new(None)),
             call_count_cond_var: Arc::new(Condvar::new()),
+            behaviour: Arc::new(Mutex::new(MockBehaviour::default())),
         }
     }
 
@@ -109,7 +118,7 @@ impl OutboundServiceMockState {
     }
 
     pub fn take_next_response(&self) -> Option<SendMessageResponse> {
-        acquire_write_lock!(self.next_response).take()
+        self.next_response.write().unwrap().take()
     }
 
     pub fn add_call(&self, req: (FinalSendMessageParams, Bytes)) {
@@ -123,6 +132,16 @@ impl OutboundServiceMockState {
 
     pub fn pop_call(&self) -> Option<(FinalSendMessageParams, Bytes)> {
         acquire_lock!(self.calls).pop()
+    }
+
+    pub fn set_behaviour(&self, behaviour: MockBehaviour) {
+        let mut lock = acquire_lock!(self.behaviour);
+        *lock = behaviour;
+    }
+
+    pub fn get_behaviour(&self) -> MockBehaviour {
+        let lock = acquire_lock!(self.behaviour);
+        (*lock).clone()
     }
 }
 
@@ -147,23 +166,84 @@ impl OutboundServiceMock {
         while let Some(req) = self.receiver.next().await {
             match req {
                 DhtOutboundRequest::SendMessage(params, body, reply_tx) => {
-                    self.mock_state.add_call((*params, body));
-                    let (inner_reply_tx, inner_reply_rx) = oneshot::channel();
-                    let response = self
-                        .mock_state
-                        .take_next_response()
-                        .or_else(|| {
-                            Some(SendMessageResponse::Queued(
-                                vec![MessageSendState::new(MessageTag::new(), inner_reply_rx)].into(),
-                            ))
-                        })
-                        .expect("never none");
+                    trace!(
+                        target: LOG_TARGET,
+                        "Send message request received with length of {} bytes",
+                        body.len()
+                    );
+                    let behaviour = self.mock_state.get_behaviour();
 
-                    reply_tx.send(response).expect("Reply channel cancelled");
-                    let _ = inner_reply_tx.send(Ok(()));
+                    match (*params).clone().broadcast_strategy {
+                        BroadcastStrategy::DirectPublicKey(_) => {
+                            match behaviour.direct {
+                                ResponseType::Queued => {
+                                    let (response, inner_reply_tx) = self.add_call((*params).clone(), body);
+                                    reply_tx.send(response).expect("Reply channel cancelled");
+                                    let _ = inner_reply_tx.send(Ok(()));
+                                },
+                                ResponseType::QueuedFail => {
+                                    let (response, inner_reply_tx) = self.add_call((*params).clone(), body);
+                                    reply_tx.send(response).expect("Reply channel cancelled");
+                                    let _ = inner_reply_tx.send(Err(()));
+                                },
+                                ResponseType::QueuedSuccessDelay(delay) => {
+                                    let (response, inner_reply_tx) = self.add_call((*params).clone(), body);
+                                    reply_tx.send(response).expect("Reply channel cancelled");
+                                    delay_for(delay).await;
+                                    let _ = inner_reply_tx.send(Ok(()));
+                                },
+                                resp => {
+                                    reply_tx
+                                        .send(SendMessageResponse::Failed(SendFailure::General(format!(
+                                            "Unexpected mock response {:?}",
+                                            resp
+                                        ))))
+                                        .expect("Reply channel cancelled");
+                                },
+                            };
+                        },
+                        BroadcastStrategy::Broadcast(_) => {
+                            if behaviour.broadcast == ResponseType::Queued {
+                                let (response, inner_reply_tx) = self.add_call((*params).clone(), body);
+                                reply_tx.send(response).expect("Reply channel cancelled");
+                                let _ = inner_reply_tx.send(Ok(()));
+                            } else {
+                                reply_tx
+                                    .send(SendMessageResponse::Failed(SendFailure::General(
+                                        "Mock broadcast behaviour was not set to Queued".to_string(),
+                                    )))
+                                    .expect("Reply channel cancelled");
+                            }
+                        },
+                        _ => {
+                            let (response, inner_reply_tx) = self.add_call((*params).clone(), body);
+                            reply_tx.send(response).expect("Reply channel cancelled");
+                            let _ = inner_reply_tx.send(Ok(()));
+                        },
+                    }
                 },
             }
         }
+    }
+
+    fn add_call(
+        &mut self,
+        params: FinalSendMessageParams,
+        body: Bytes,
+    ) -> (SendMessageResponse, oneshot::Sender<Result<(), ()>>)
+    {
+        self.mock_state.add_call((params, body));
+        let (inner_reply_tx, inner_reply_rx) = oneshot::channel();
+        let response = self
+            .mock_state
+            .take_next_response()
+            .or_else(|| {
+                Some(SendMessageResponse::Queued(
+                    vec![MessageSendState::new(MessageTag::new(), inner_reply_rx)].into(),
+                ))
+            })
+            .expect("never none");
+        (response, inner_reply_tx)
     }
 }
 
@@ -199,6 +279,32 @@ mod condvar_shim {
                     PoisonError::new((guard, timeout.timed_out()))
                 })?
                 .0;
+        }
+    }
+}
+
+/// Define the three response options the mock can respond with.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ResponseType {
+    Queued,
+    QueuedFail,
+    QueuedSuccessDelay(Duration),
+    Failed,
+    PendingDiscovery,
+}
+
+/// Define how the mock service will response to various broadcast strategies
+#[derive(Clone)]
+pub struct MockBehaviour {
+    pub direct: ResponseType,
+    pub broadcast: ResponseType,
+}
+
+impl Default for MockBehaviour {
+    fn default() -> Self {
+        Self {
+            direct: ResponseType::Queued,
+            broadcast: ResponseType::Queued,
         }
     }
 }

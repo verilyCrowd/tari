@@ -24,10 +24,12 @@ use super::base_node::{
     base_node_service_request::Request as ProtoNodeCommsRequest,
     BlockHeights,
     FetchHeadersAfter as ProtoFetchHeadersAfter,
+    FetchMmrNodeCount as ProtoFetchMmrNodeCount,
+    FetchMmrNodes as ProtoFetchMmrNodes,
     HashOutputs,
 };
 use crate::{base_node::comms_interface as ci, proof_of_work::PowAlgorithm, transactions::types::HashOutput};
-use std::convert::{TryFrom, TryInto};
+use std::convert::{From, TryFrom, TryInto};
 
 //---------------------------------- BaseNodeRequest --------------------------------------------//
 impl TryInto<ci::NodeCommsRequest> for ProtoNodeCommsRequest {
@@ -47,10 +49,18 @@ impl TryInto<ci::NodeCommsRequest> for ProtoNodeCommsRequest {
             FetchUtxos(hash_outputs) => ci::NodeCommsRequest::FetchUtxos(hash_outputs.outputs),
             FetchBlocks(block_heights) => ci::NodeCommsRequest::FetchBlocks(block_heights.heights),
             FetchBlocksWithHashes(block_hashes) => ci::NodeCommsRequest::FetchBlocksWithHashes(block_hashes.outputs),
-            GetNewBlockTemplate(_) => ci::NodeCommsRequest::GetNewBlockTemplate,
+            GetNewBlockTemplate(pow_algo) => {
+                ci::NodeCommsRequest::GetNewBlockTemplate(PowAlgorithm::try_from(pow_algo)?)
+            },
             GetNewBlock(block_template) => ci::NodeCommsRequest::GetNewBlock(block_template.try_into()?),
             GetTargetDifficulty(pow_algo) => {
                 ci::NodeCommsRequest::GetTargetDifficulty(PowAlgorithm::try_from(pow_algo)?)
+            },
+            FetchMmrNodeCount(request) => {
+                ci::NodeCommsRequest::FetchMmrNodeCount(request.tree.try_into()?, request.height)
+            },
+            FetchMmrNodes(request) => {
+                ci::NodeCommsRequest::FetchMmrNodes(request.tree.try_into()?, request.pos, request.count)
             },
         };
         Ok(request)
@@ -71,9 +81,18 @@ impl From<ci::NodeCommsRequest> for ProtoNodeCommsRequest {
             FetchUtxos(hash_outputs) => ProtoNodeCommsRequest::FetchUtxos(hash_outputs.into()),
             FetchBlocks(block_heights) => ProtoNodeCommsRequest::FetchBlocks(block_heights.into()),
             FetchBlocksWithHashes(block_hashes) => ProtoNodeCommsRequest::FetchBlocksWithHashes(block_hashes.into()),
-            GetNewBlockTemplate => ProtoNodeCommsRequest::GetNewBlockTemplate(true),
+            GetNewBlockTemplate(pow_algo) => ProtoNodeCommsRequest::GetNewBlockTemplate(pow_algo as u64),
             GetNewBlock(block_template) => ProtoNodeCommsRequest::GetNewBlock(block_template.into()),
             GetTargetDifficulty(pow_algo) => ProtoNodeCommsRequest::GetTargetDifficulty(pow_algo as u64),
+            FetchMmrNodeCount(tree, height) => ProtoNodeCommsRequest::FetchMmrNodeCount(ProtoFetchMmrNodeCount {
+                tree: tree as i32,
+                height,
+            }),
+            FetchMmrNodes(tree, pos, count) => ProtoNodeCommsRequest::FetchMmrNodes(ProtoFetchMmrNodes {
+                tree: tree as i32,
+                pos,
+                count,
+            }),
         }
     }
 }

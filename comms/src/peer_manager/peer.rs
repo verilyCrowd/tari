@@ -56,7 +56,7 @@ pub struct PeerIdentity {
 /// A Peer represents a communication peer that is identified by a Public Key and NodeId. The Peer struct maintains a
 /// collection of the NetAddressesWithStats that this Peer can be reached by. The struct also maintains a set of flags
 /// describing the status of the Peer.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Peer {
     /// The local id of the peer. If this is None, the peer has never been persisted
     id: Option<PeerId>,
@@ -158,21 +158,17 @@ impl Peer {
         self.id = Some(id);
     }
 
+    #[allow(clippy::option_option)]
     pub fn update(
         &mut self,
-        node_id: Option<NodeId>,
         net_addresses: Option<Vec<Multiaddr>>,
         flags: Option<PeerFlags>,
-        #[allow(clippy::option_option)] banned_until: Option<Option<Duration>>,
-        #[allow(clippy::option_option)] is_offline: Option<bool>,
+        banned_until: Option<Option<Duration>>,
+        is_offline: Option<bool>,
         features: Option<PeerFeatures>,
-        connection_stats: Option<PeerConnectionStats>,
         supported_protocols: Option<Vec<ProtocolId>>,
     )
     {
-        if let Some(new_node_id) = node_id {
-            self.node_id = new_node_id
-        }
         if let Some(new_net_addresses) = net_addresses {
             self.addresses.update_net_addresses(new_net_addresses)
         }
@@ -189,9 +185,6 @@ impl Peer {
         }
         if let Some(new_features) = features {
             self.features = new_features;
-        }
-        if let Some(connection_stats) = connection_stats {
-            self.connection_stats = connection_stats;
         }
         if let Some(supported_protocols) = supported_protocols {
             self.supported_protocols = supported_protocols;
@@ -210,9 +203,7 @@ impl Peer {
 
     /// Returns the ban status of the peer
     pub fn is_banned(&self) -> bool {
-        self.banned_until
-            .map(|dt| dt >= Utc::now().naive_utc())
-            .unwrap_or(false)
+        self.banned_until().is_some()
     }
 
     /// Bans the peer for a specified duration
@@ -227,7 +218,7 @@ impl Peer {
     }
 
     pub fn banned_until(&self) -> Option<&NaiveDateTime> {
-        self.banned_until.as_ref()
+        self.banned_until.as_ref().filter(|dt| *dt > &Utc::now().naive_utc())
     }
 
     /// Marks the peer as offline
@@ -282,6 +273,12 @@ impl Display for Peer {
     }
 }
 
+impl PartialEq for Peer {
+    fn eq(&self, other: &Self) -> bool {
+        self.public_key == other.public_key
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -294,7 +291,7 @@ mod test {
     };
 
     #[test]
-    fn test_is_and_set_banned() {
+    fn test_is_banned_and_ban_for() {
         let mut rng = rand::rngs::OsRng;
         let (_sk, pk) = RistrettoPublicKey::random_keypair(&mut rng);
         let node_id = NodeId::from_key(&pk).unwrap();
@@ -315,31 +312,27 @@ mod test {
         let net_address1 = "/ip4/124.0.0.124/tcp/7000".parse::<Multiaddr>().unwrap();
         let mut peer: Peer = Peer::new(
             public_key1.clone(),
-            node_id,
+            node_id.clone(),
             MultiaddressesWithStats::from(net_address1.clone()),
             PeerFlags::default(),
             PeerFeatures::empty(),
             &[],
         );
 
-        let (_sk, public_key2) = RistrettoPublicKey::random_keypair(&mut rng);
-        let node_id2 = NodeId::from_key(&public_key2).unwrap();
         let net_address2 = "/ip4/125.0.0.125/tcp/8000".parse::<Multiaddr>().unwrap();
         let net_address3 = "/ip4/126.0.0.126/tcp/9000".parse::<Multiaddr>().unwrap();
 
         peer.update(
-            Some(node_id2.clone()),
             Some(vec![net_address2.clone(), net_address3.clone()]),
             None,
             Some(Some(Duration::from_secs(1000))),
             None,
             Some(PeerFeatures::MESSAGE_PROPAGATION),
-            Some(PeerConnectionStats::new()),
             Some(vec![protocol::IDENTITY_PROTOCOL.clone()]),
         );
 
         assert_eq!(peer.public_key, public_key1);
-        assert_eq!(peer.node_id, node_id2);
+        assert_eq!(peer.node_id, node_id);
         assert!(!peer
             .addresses
             .addresses

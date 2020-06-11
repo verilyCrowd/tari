@@ -20,11 +20,11 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use crate::{outbound::DhtOutboundRequest, DbConnectionUrl, Dht, DhtConfig};
+use crate::{dht::DhtInitializationError, outbound::DhtOutboundRequest, DbConnectionUrl, Dht, DhtConfig};
 use futures::channel::mpsc;
 use std::{sync::Arc, time::Duration};
 use tari_comms::{
-    connection_manager::ConnectionManagerRequester,
+    connectivity::ConnectivityRequester,
     peer_manager::{NodeIdentity, PeerManager},
 };
 use tari_shutdown::ShutdownSignal;
@@ -34,7 +34,7 @@ pub struct DhtBuilder {
     peer_manager: Arc<PeerManager>,
     config: DhtConfig,
     outbound_tx: mpsc::Sender<DhtOutboundRequest>,
-    connection_manager: ConnectionManagerRequester,
+    connectivity: ConnectivityRequester,
     shutdown_signal: ShutdownSignal,
 }
 
@@ -43,7 +43,7 @@ impl DhtBuilder {
         node_identity: Arc<NodeIdentity>,
         peer_manager: Arc<PeerManager>,
         outbound_tx: mpsc::Sender<DhtOutboundRequest>,
-        connection_manager: ConnectionManagerRequester,
+        connectivity: ConnectivityRequester,
         shutdown_signal: ShutdownSignal,
     ) -> Self
     {
@@ -55,7 +55,7 @@ impl DhtBuilder {
             node_identity,
             peer_manager,
             outbound_tx,
-            connection_manager,
+            connectivity,
             shutdown_signal,
         }
     }
@@ -67,6 +67,11 @@ impl DhtBuilder {
 
     pub fn local_test(mut self) -> Self {
         self.config = DhtConfig::default_local_test();
+        self
+    }
+
+    pub fn disable_auto_store_and_forward_requests(mut self) -> Self {
+        self.config.saf_auto_request = false;
         self
     }
 
@@ -95,8 +100,18 @@ impl DhtBuilder {
         self
     }
 
-    pub fn with_num_neighbouring_nodes(mut self, num_neighbours: usize) -> Self {
-        self.config.num_neighbouring_nodes = num_neighbours;
+    pub fn with_num_random_nodes(mut self, n: usize) -> Self {
+        self.config.num_random_nodes = n;
+        self
+    }
+
+    pub fn with_num_neighbouring_nodes(mut self, n: usize) -> Self {
+        self.config.num_neighbouring_nodes = n;
+        self
+    }
+
+    pub fn with_propagation_factor(mut self, propagation_factor: usize) -> Self {
+        self.config.propagation_factor = propagation_factor;
         self
     }
 
@@ -105,17 +120,23 @@ impl DhtBuilder {
         self
     }
 
-    /// Build a Dht object.
+    pub fn enable_auto_join(mut self) -> Self {
+        self.config.auto_join = true;
+        self
+    }
+
+    /// Build and initialize a Dht object.
     ///
-    /// Will panic if an executor is not given AND not in a tokio runtime context
-    pub fn finish(self) -> Dht {
-        Dht::new(
+    /// Will panic not in a tokio runtime context
+    pub async fn finish(self) -> Result<Dht, DhtInitializationError> {
+        Dht::initialize(
             self.config,
             self.node_identity,
             self.peer_manager,
             self.outbound_tx,
-            self.connection_manager,
+            self.connectivity,
             self.shutdown_signal,
         )
+        .await
     }
 }

@@ -20,16 +20,13 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use crate::{
-    blocks::BlockHeader,
-    proof_of_work::{Difficulty, ProofOfWork},
-};
+use crate::{blocks::BlockHeader, proof_of_work::ProofOfWork};
 use log::*;
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -48,20 +45,18 @@ pub struct CpuBlakePow;
 impl CpuBlakePow {
     /// A simple miner. It starts with a random nonce and iterates until it finds a header hash that meets the desired
     /// target
-    pub fn mine(
-        target_difficulty: Difficulty,
-        mut header: BlockHeader,
-        stop_flag: Arc<AtomicBool>,
-    ) -> Option<BlockHeader>
-    {
+    pub fn mine(mut header: BlockHeader, stop_flag: Arc<AtomicBool>, hashrate: Arc<AtomicU64>) -> Option<BlockHeader> {
         let mut start = Instant::now();
         let mut nonce: u64 = OsRng.next_u64();
         let mut last_measured_nonce = nonce;
         // We're mining over here!
         let mut difficulty = ProofOfWork::achieved_difficulty(&header);
         info!(target: LOG_TARGET, "Mining started.");
-        debug!(target: LOG_TARGET, "Mining for difficulty: {:?}", target_difficulty);
-        while difficulty < target_difficulty {
+        debug!(
+            target: LOG_TARGET,
+            "Mining for difficulty: {:?}", header.pow.target_difficulty
+        );
+        while difficulty < header.pow.target_difficulty {
             if start.elapsed() >= Duration::from_secs(60) {
                 // nonce might have wrapped around
                 let hashes = if nonce >= last_measured_nonce {
@@ -70,6 +65,7 @@ impl CpuBlakePow {
                     std::u64::MAX - last_measured_nonce + nonce
                 };
                 let hash_rate = hashes as f64 / start.elapsed().as_micros() as f64;
+                hashrate.store((hash_rate * 1_000_000.0) as u64, Ordering::Relaxed);
                 info!(target: LOG_TARGET, "Mining hash rate per thread: {:.6} MH/s", hash_rate);
                 last_measured_nonce = nonce;
                 start = Instant::now();

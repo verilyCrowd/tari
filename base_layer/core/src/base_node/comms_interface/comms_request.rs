@@ -48,9 +48,11 @@ pub enum NodeCommsRequest {
     FetchUtxos(Vec<HashOutput>),
     FetchBlocks(Vec<u64>),
     FetchBlocksWithHashes(Vec<HashOutput>),
-    GetNewBlockTemplate,
+    GetNewBlockTemplate(PowAlgorithm),
     GetNewBlock(NewBlockTemplate),
     GetTargetDifficulty(PowAlgorithm),
+    FetchMmrNodeCount(MmrTree, u64),
+    FetchMmrNodes(MmrTree, u32, u32),
 }
 
 impl Display for NodeCommsRequest {
@@ -64,9 +66,16 @@ impl Display for NodeCommsRequest {
             NodeCommsRequest::FetchUtxos(v) => f.write_str(&format!("FetchUtxos (n={})", v.len())),
             NodeCommsRequest::FetchBlocks(v) => f.write_str(&format!("FetchBlocks (n={})", v.len())),
             NodeCommsRequest::FetchBlocksWithHashes(v) => f.write_str(&format!("FetchBlocks (n={})", v.len())),
-            NodeCommsRequest::GetNewBlockTemplate => f.write_str("GetNewBlockTemplate"),
+            NodeCommsRequest::GetNewBlockTemplate(algo) => f.write_str(&format!("GetNewBlockTemplate ({})", algo)),
             NodeCommsRequest::GetNewBlock(b) => f.write_str(&format!("GetNewBlock (Block Height={})", b.header.height)),
             NodeCommsRequest::GetTargetDifficulty(algo) => f.write_str(&format!("GetTargetDifficulty ({})", algo)),
+            NodeCommsRequest::FetchMmrNodeCount(tree, height) => {
+                f.write_str(&format!("FetchMmrNodeCount (tree={},Block Height={})", tree, height))
+            },
+            NodeCommsRequest::FetchMmrNodes(tree, pos, count) => f.write_str(&format!(
+                "FetchMmrNodeCount (tree={},pos={},count={})",
+                tree, pos, count
+            )),
         }
     }
 }
