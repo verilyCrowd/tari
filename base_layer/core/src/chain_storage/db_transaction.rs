@@ -39,6 +39,7 @@ use tari_crypto::tari_utilities::{
     hex::{to_hex, Hex},
     Hashable,
 };
+use crate::proof_of_work::Difficulty;
 
 #[derive(Debug)]
 pub struct DbTransaction {
@@ -111,8 +112,8 @@ impl DbTransaction {
     }
 
     /// Inserts a block header into the current transaction.
-    pub fn insert_header(&mut self, header: BlockHeader) -> &mut Self {
-        self.operations.push(WriteOperation::InsertHeader(Box::new(header)));
+    pub fn insert_header(&mut self, header: BlockHeader, achieved_difficulty: Difficulty) -> &mut Self {
+        self.operations.push(WriteOperation::InsertHeader{header: Box::new(header), achieved_difficulty});
         self
     }
 
@@ -138,8 +139,8 @@ impl DbTransaction {
     /// Add the BlockHeader and contents of a `Block` (i.e. inputs, outputs and kernels) to the database.
     /// If the `BlockHeader` already exists, then just the contents are updated along with the relevant accumulated
     /// data.
-    pub fn insert_block(&mut self, block: Arc<Block>) -> &mut Self {
-        self.operations.push(WriteOperation::InsertBlock(block));
+    pub fn insert_block(&mut self, block: Arc<Block>, achieved_difficulty: Difficulty) -> &mut Self {
+        self.operations.push(WriteOperation::InsertBlock{block,  achieved_difficulty});
         self
     }
 
@@ -176,8 +177,8 @@ impl DbTransaction {
 pub enum WriteOperation {
     SetMetadata(MetadataKey, MetadataValue),
     InsertOrphanBlock(Arc<Block>),
-    InsertHeader(Box<BlockHeader>),
-    InsertBlock(Arc<Block>),
+    InsertHeader{ header: Box<BlockHeader>, achieved_difficulty: Difficulty},
+    InsertBlock{block: Arc<Block>, achieved_difficulty: Difficulty},
     InsertInput {
         header_hash: HashOutput,
         input: Box<TransactionInput>,
@@ -210,12 +211,13 @@ impl fmt::Display for WriteOperation {
                 block.hash().to_hex(),
                 block.body.to_counts_string()
             ),
-            InsertHeader(header) => write!(f, "InsertBlock(#{} {})", header.height, header.hash().to_hex()),
-            InsertBlock(block) => write!(
+            InsertHeader{header, achieved_difficulty}  => write!(f, "InsertHeader(#{} {} {})", header.height, header.hash().to_hex(), achieved_difficulty),
+            InsertBlock{block, achieved_difficulty} => write!(
                 f,
-                "InsertBlock({}, {})",
+                "InsertBlock({}, {} {})",
                 block.hash().to_hex(),
-                block.body.to_counts_string()
+                block.body.to_counts_string(),
+                achieved_difficulty
             ),
             InsertKernel {
                 header_hash,

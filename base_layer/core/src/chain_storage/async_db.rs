@@ -43,11 +43,13 @@ use crate::{
         types::{Commitment, HashOutput, Signature},
     },
 };
+use crate::chain_storage::accumulated_data::BlockHeaderAccumulatedData;
 use log::*;
 use rand::{rngs::OsRng, RngCore};
 use std::{mem, ops::RangeBounds, sync::Arc, time::Instant};
 use tari_common_types::{chain_metadata::ChainMetadata, types::BlockHash};
 use tari_mmr::Hash;
+use crate::proof_of_work::Difficulty;
 
 const LOG_TARGET: &str = "c::bn::async_db";
 
@@ -155,6 +157,8 @@ impl<B: BlockchainBackend + 'static> AsyncBlockchainDb<B> {
     //---------------------------------- Headers --------------------------------------------//
     make_async_fn!(fetch_header(height: u64) -> Option<BlockHeader>, "fetch_header");
 
+    make_async_fn!(fetch_header_accumulated_data(hash: HashOutput) -> Option<BlockHeaderAccumulatedData>, "fetch_header_accumulated_data");
+
     make_async_fn!(fetch_headers<T: RangeBounds<u64>>(bounds: T) -> Vec<BlockHeader>, "fetch_headers");
 
     make_async_fn!(fetch_header_by_block_hash(hash: HashOutput) -> Option<BlockHeader>, "fetch_header_by_block_hash");
@@ -240,16 +244,16 @@ impl<'a, B: BlockchainBackend + 'static> AsyncDbTransaction<'a, B> {
         }
     }
 
-    pub fn insert_header(&mut self, header: BlockHeader) -> &mut Self {
-        self.transaction.insert_header(header);
+    pub fn insert_header(&mut self, header: BlockHeader, achieved_difficulty: Difficulty) -> &mut Self {
+        self.transaction.insert_header(header, achieved_difficulty);
         self
     }
 
     /// Add the BlockHeader and contents of a `Block` (i.e. inputs, outputs and kernels) to the database.
     /// If the `BlockHeader` already exists, then just the contents are updated along with the relevant accumulated
     /// data.
-    pub fn insert_block(&mut self, block: Arc<Block>) -> &mut Self {
-        self.transaction.insert_block(block);
+    pub fn insert_block(&mut self, block: Arc<Block>, achieved_difficulty: Difficulty) -> &mut Self {
+        self.transaction.insert_block(block, achieved_difficulty);
         self
     }
 

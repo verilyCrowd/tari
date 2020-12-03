@@ -61,6 +61,7 @@ use tari_common_types::{chain_metadata::ChainMetadata, types::BlockHash};
 use tari_crypto::tari_utilities::{hex::Hex, Hashable};
 use tari_mmr::{Hash, MerkleMountainRange, MutableMmr, MutableMmrLeafNodes};
 use uint::static_assertions::_core::ops::RangeBounds;
+use crate::proof_of_work::Difficulty;
 
 const LOG_TARGET: &str = "c::cs::database";
 
@@ -1260,10 +1261,10 @@ pub fn fetch_headers<T: BlockchainBackend>(
     }
 }
 
-fn insert_headers<T: BlockchainBackend>(db: &mut T, headers: Vec<BlockHeader>) -> Result<(), ChainStorageError> {
+fn insert_headers<T: BlockchainBackend>(db: &mut T, headers: Vec<(BlockHeader, Difficulty)>) -> Result<(), ChainStorageError> {
     let mut txn = DbTransaction::new();
-    headers.into_iter().for_each(|header| {
-        txn.insert_header(header);
+    headers.into_iter().for_each(|(header,  achieved_difficulty)| {
+        txn.insert_header(header, achieved_difficulty);
     });
     db.write(txn)
 }

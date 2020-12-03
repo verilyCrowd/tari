@@ -58,6 +58,7 @@ use std::{
 use tari_common_types::types::{BlockHash, BLOCK_HASH_LENGTH};
 use tari_crypto::tari_utilities::{epoch_time::EpochTime, hex::Hex, ByteArray, Hashable};
 use thiserror::Error;
+use crate::chain_storage::BlockHeaderAccumulatedData;
 
 #[derive(Debug, Error)]
 pub enum BlockHeaderValidationError {
@@ -129,10 +130,10 @@ impl BlockHeader {
     /// previous block hash is set, and the timestamp is set to the current time and the proof of work is partially
     /// initialized, although the `accumulated_difficulty_<algo>` stats are updated using the previous block's proof
     /// of work information.
-    pub fn from_previous(prev: &BlockHeader) -> Result<BlockHeader, BlockHeaderValidationError> {
+    pub fn from_previous(prev: &BlockHeader, prev_accumulated_data: &BlockHeaderAccumulatedData) -> Result<BlockHeader, BlockHeaderValidationError> {
         let prev_hash = prev.hash();
         let mut pow = ProofOfWork::default();
-        pow.add_difficulty(&prev.pow, prev.achieved_difficulty()?);
+        pow.add_difficulty(&prev.pow, prev_accumulated_data.achieved_difficulty);
         Ok(BlockHeader {
             version: prev.version,
             height: prev.height + 1,

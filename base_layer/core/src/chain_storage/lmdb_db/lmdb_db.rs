@@ -84,6 +84,7 @@ use tari_common_types::{
 use tari_crypto::tari_utilities::{hash::Hashable, hex::Hex};
 use tari_mmr::{Hash, MerkleMountainRange, MutableMmr};
 use tari_storage::lmdb_store::{db, LMDBBuilder, LMDBConfig, LMDBStore};
+use crate::proof_of_work::Difficulty;
 
 type DatabaseRef = Arc<Database<'static>>;
 
@@ -149,16 +150,16 @@ impl LMDBDatabase {
                 SetMetadata(key, value) => self.set_metadata(&write_txn, key, value)?,
                 InsertOrphanBlock(block) => self.insert_orphan_block(&write_txn, &block)?,
                 Delete(delete) => self.op_delete(&write_txn, delete)?,
-                InsertHeader(header) => {
-                    if !self.insert_header(&write_txn, &*header)? {
+                InsertHeader{header, achieved_difficulty} => {
+                    if !self.insert_header(&write_txn, &*header, achieved_difficulty)? {
                         return Err(ChainStorageError::InvalidOperation(format!(
                             "Duplicate `BlockHeader` key `{}`",
                             header.height
                         )));
                     }
                 },
-                InsertBlock(block) => {
-                    self.insert_header(&write_txn, &block.header)?;
+                InsertBlock{block, achieved_difficulty} => {
+                    self.insert_header(&write_txn, &block.header, achieved_difficulty)?;
                     self.insert_block_body(&write_txn, &block.header, block.body.clone())?;
                 },
                 InsertKernel {
@@ -335,7 +336,7 @@ impl LMDBDatabase {
 
     /// Inserts the header and header accumulated data. True is returned if a new header is inserted, otherwise false if
     /// the header already exists
-    fn insert_header(&mut self, txn: &WriteTransaction<'_>, header: &BlockHeader) -> Result<bool, ChainStorageError> {
+    fn insert_header(&mut self, txn: &WriteTransaction<'_>, header: &BlockHeader, achieved_difficulty: Difficulty) -> Result<bool, ChainStorageError> {
         if lmdb_exists(txn, &self.headers_db, &header.height)? {
             return Ok(false);
         }
@@ -355,6 +356,8 @@ impl LMDBDatabase {
         let data = BlockHeaderAccumulatedData {
             hash: hash.clone(),
             total_kernel_offset: &header.total_kernel_offset + prev_data.total_kernel_offset,
+            achieved_difficulty
+
         };
 
         lmdb_replace(&txn, &self.header_accumulated_data_db, &data.hash, &data)?;

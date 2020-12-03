@@ -40,3 +40,4 @@ pub use traits::{StatefulValidation, StatefulValidator, Validation, ValidationEx
 pub mod block_validators;
 pub mod mocks;
 pub mod transaction_validators;
+pub mod header_validator;

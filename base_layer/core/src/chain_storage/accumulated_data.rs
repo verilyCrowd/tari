@@ -33,6 +33,7 @@ use serde::{
 };
 use std::fmt;
 use tari_mmr::pruned_hashset::PrunedHashSet;
+use crate::proof_of_work::Difficulty;
 
 #[derive(Debug)]
 pub struct BlockAccumulatedData {
@@ -220,4 +221,5 @@ impl<'de> Visitor<'de> for BlockAccumulatedDataVisitor {
 pub struct BlockHeaderAccumulatedData {
     pub hash: HashOutput,
     pub total_kernel_offset: BlindingFactor,
+    pub achieved_difficulty: Difficulty
 }

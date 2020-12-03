@@ -43,6 +43,7 @@ use std::{
 };
 use tari_crypto::tari_utilities::hex::{from_hex, Hex, HexError};
 use thiserror::Error;
+use crate::proof_of_work::randomx_factory::RandomXFactory;
 
 pub const LOG_TARGET: &str = "c::pow::monero_rx";
 
@@ -212,10 +213,8 @@ pub fn monero_difficulty(header: &BlockHeader) -> Result<Difficulty, MergeMineEr
 }
 
 fn get_random_x_difficulty(input: &[u8], key: &[u8]) -> Result<(Difficulty, Vec<u8>), MergeMineError> {
-    let flags = RandomXFlag::get_recommended_flags();
-    let cache = RandomXCache::new(flags, &key)?;
-    let dataset = RandomXDataset::new(flags, &cache, 0)?;
-    let vm = RandomXVM::new(flags, Some(&cache), Some(&dataset))?;
+
+    let vm = RandomXFactory::create(&key);
     let hash = vm.calculate_hash(&input)?;
     debug!(
         target: LOG_TARGET,
