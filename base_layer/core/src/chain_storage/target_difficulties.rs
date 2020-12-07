@@ -25,6 +25,7 @@ use crate::{
     consensus::ConsensusManager,
     proof_of_work::{PowAlgorithm, TargetDifficultyWindow},
 };
+use crate::proof_of_work::Difficulty;
 
 #[derive(Debug, Clone)]
 pub struct TargetDifficulties {
@@ -45,9 +46,9 @@ impl TargetDifficulties {
             .add_back(header.timestamp(), header.target_difficulty());
     }
 
-    pub fn add_front(&mut self, header: &BlockHeader) {
+    pub fn add_front(&mut self, header: &BlockHeader, target_difficulty: Difficulty) {
         self.get_mut(header.pow_algo())
-            .add_front(header.timestamp(), header.target_difficulty());
+            .add_front(header.timestamp(), target_difficulty);
     }
 
     pub fn is_algo_full(&self, algo: PowAlgorithm) -> bool {

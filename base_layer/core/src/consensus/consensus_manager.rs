@@ -27,8 +27,6 @@ use crate::{
             get_mainnet_genesis_block,
             get_ridcully_block_hash,
             get_ridcully_genesis_block,
-            get_rincewind_block_hash,
-            get_rincewind_genesis_block,
         },
         Block,
     },
@@ -44,6 +42,7 @@ use crate::{
 };
 use std::{convert::TryFrom, sync::Arc};
 use thiserror::Error;
+use crate::chain_storage::BlockHeaderAccumulatedData;
 
 #[derive(Debug, Error)]
 pub enum ConsensusManagerError {
@@ -71,10 +70,9 @@ impl ConsensusManager {
     }
 
     /// Returns the genesis block for the selected network.
-    pub fn get_genesis_block(&self) -> Block {
+    pub fn get_genesis_block(&self) -> (Block, BlockHeaderAccumulatedData) {
         match self.inner.network {
             Network::MainNet => get_mainnet_genesis_block(),
-            Network::Rincewind => get_rincewind_genesis_block(),
             Network::Ridcully => get_ridcully_genesis_block(),
             Network::LocalNet => get_ridcully_genesis_block(),
         }
@@ -84,7 +82,6 @@ impl ConsensusManager {
     pub fn get_genesis_block_hash(&self) -> Vec<u8> {
         match self.inner.network {
             Network::MainNet => get_mainnet_block_hash(),
-            Network::Rincewind => get_rincewind_block_hash(),
             Network::Ridcully => get_ridcully_block_hash(),
             Network::LocalNet => get_ridcully_block_hash(),
         }

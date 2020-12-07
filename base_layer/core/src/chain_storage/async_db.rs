@@ -171,7 +171,7 @@ impl<B: BlockchainBackend + 'static> AsyncBlockchainDb<B> {
 
     make_async_fn!(fetch_tip_header() -> BlockHeader, "fetch_header");
 
-    make_async_fn!(insert_valid_headers(headers: Vec<BlockHeader>) -> (), "insert_valid_headers");
+    make_async_fn!(insert_valid_headers(headers: Vec<(BlockHeader, BlockHeaderAccumulatedData)>) -> (), "insert_valid_headers");
 
     make_async_fn!(fetch_target_difficulty(pow_algo: PowAlgorithm, height: u64) -> TargetDifficultyWindow, "fetch_target_difficulty");
 
@@ -244,16 +244,16 @@ impl<'a, B: BlockchainBackend + 'static> AsyncDbTransaction<'a, B> {
         }
     }
 
-    pub fn insert_header(&mut self, header: BlockHeader, achieved_difficulty: Difficulty) -> &mut Self {
-        self.transaction.insert_header(header, achieved_difficulty);
+    pub fn insert_header(&mut self, header: BlockHeader, accum_data: BlockHeaderAccumulatedData) -> &mut Self {
+        self.transaction.insert_header(header, accum_data);
         self
     }
 
     /// Add the BlockHeader and contents of a `Block` (i.e. inputs, outputs and kernels) to the database.
     /// If the `BlockHeader` already exists, then just the contents are updated along with the relevant accumulated
     /// data.
-    pub fn insert_block(&mut self, block: Arc<Block>, achieved_difficulty: Difficulty) -> &mut Self {
-        self.transaction.insert_block(block, achieved_difficulty);
+    pub fn insert_block(&mut self, block: Arc<Block>, accum_data: BlockHeaderAccumulatedData) -> &mut Self {
+        self.transaction.insert_block(block, accum_data);
         self
     }
 

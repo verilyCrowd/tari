@@ -51,6 +51,7 @@ use tari_common_types::chain_metadata::ChainMetadata;
 use tari_comms::{connectivity::ConnectivityError, peer_manager::PeerManagerError};
 use tari_crypto::tari_utilities::{hex::Hex, Hashable};
 use thiserror::Error;
+use crate::chain_storage::BlockHeaderAccumulatedData;
 
 const LOG_TARGET: &str = "c::bn::state_machine_service::states::block_sync";
 
@@ -350,8 +351,17 @@ async fn synchronize_blocks<B: BlockchainBackend + 'static>(
     let metadata = shared.db.get_chain_metadata().await?;
     let last_block = shared.db.fetch_block(metadata.height_of_longest_chain()).await?;
 
-    check_actual_difficulty_matches_advertised(shared, &last_block.block.header, sync_peers).await?;
+    if metadata.best_block() == network_metadata.best_block() {
 
+        let last_accum_data = shared.db.fetch_header_accumulated_data(last_block.block.hash()).await?.ok_or_else(|| ChainStorageError::ValueNotFound {
+            entity: "Accumulated header data".to_string(),
+            field: "hash".to_string(),
+            value: last_block.block.hash().to_hex()
+        })?;
+
+        // Don't ban if we have somehow landed on a different block (due to race conditions
+        check_actual_difficulty_matches_advertised(shared, &last_accum_data, sync_peers).await?;
+    }
     shared
         .local_node_interface
         .publish_block_event(BlockEvent::BlockSyncComplete(Arc::new(last_block.block)));
@@ -360,11 +370,11 @@ async fn synchronize_blocks<B: BlockchainBackend + 'static>(
 
 async fn check_actual_difficulty_matches_advertised<B: BlockchainBackend + 'static>(
     shared: &mut BaseNodeStateMachine<B>,
-    tip_header: &BlockHeader,
+    tip_header_data: &BlockHeaderAccumulatedData,
     sync_peers: &mut SyncPeers,
 ) -> Result<(), BlockSyncError>
 {
-    let actual_acc_difficulty = tip_header.get_proof_of_work()?.total_accumulated_difficulty();
+    let actual_acc_difficulty = tip_header_data.total_accumulated_difficulty;
     // Clone peers that need to be banned, this is done because of the mutable reference to sync peers that
     // ban_sync_peer requires. TODO: Sync peer management should be correctly encapsulated
     let peers_to_ban = sync_peers

@@ -158,6 +158,10 @@ impl BlockchainBackend for TempDatabase {
         self.db.contains(key)
     }
 
+    fn fetch_header_and_accumulated_data(&self, height: u64) -> Result<(BlockHeader, BlockHeaderAccumulatedData), ChainStorageError> {
+        self.db.fetch_header_and_accumulated_data(height)
+    }
+
     fn fetch_header_accumulated_data(
         &self,
         hash: &HashOutput,

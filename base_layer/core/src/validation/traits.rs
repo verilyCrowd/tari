@@ -21,6 +21,8 @@
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 use crate::validation::{and_then::AndThenValidator, error::ValidationError};
+use crate::blocks::BlockHeader;
+use crate::chain_storage::BlockHeaderAccumulatedData;
 
 pub type StatefulValidator<T, B> = Box<dyn StatefulValidation<T, B>>;
 pub type Validator<T> = Box<dyn Validation<T>>;
@@ -37,6 +39,14 @@ pub trait StatefulValidation<T, B>: Send + Sync {
 pub trait Validation<T>: Send + Sync {
     /// General validation code that can run independent of external state
     fn validate(&self, item: &T) -> Result<(), ValidationError>;
+}
+
+pub trait HeaderValidation : Send + Sync {
+    fn validate(&self, header: &BlockHeader, previous_header: &BlockHeader, previous_data: &BlockHeaderAccumulatedData) -> Result<BlockHeaderAccumulatedData, ValidationError>;
+}
+
+pub trait FinalHeaderStateValidation: Send + Sync {
+    fn validate(&self, header: &BlockHeader) -> Result<(), ValidationError>;
 }
 
 pub trait ValidationExt<T>: Validation<T> {

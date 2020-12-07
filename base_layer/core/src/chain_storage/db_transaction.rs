@@ -40,6 +40,7 @@ use tari_crypto::tari_utilities::{
     Hashable,
 };
 use crate::proof_of_work::Difficulty;
+use crate::chain_storage::BlockHeaderAccumulatedData;
 
 #[derive(Debug)]
 pub struct DbTransaction {
@@ -112,8 +113,8 @@ impl DbTransaction {
     }
 
     /// Inserts a block header into the current transaction.
-    pub fn insert_header(&mut self, header: BlockHeader, achieved_difficulty: Difficulty) -> &mut Self {
-        self.operations.push(WriteOperation::InsertHeader{header: Box::new(header), achieved_difficulty});
+    pub fn insert_header(&mut self, header: BlockHeader, accum_data: BlockHeaderAccumulatedData) -> &mut Self {
+        self.operations.push(WriteOperation::InsertHeader{header: Box::new(header), accum_data: Box::new(accum_data)});
         self
     }
 
@@ -139,8 +140,8 @@ impl DbTransaction {
     /// Add the BlockHeader and contents of a `Block` (i.e. inputs, outputs and kernels) to the database.
     /// If the `BlockHeader` already exists, then just the contents are updated along with the relevant accumulated
     /// data.
-    pub fn insert_block(&mut self, block: Arc<Block>, achieved_difficulty: Difficulty) -> &mut Self {
-        self.operations.push(WriteOperation::InsertBlock{block,  achieved_difficulty});
+    pub fn insert_block(&mut self, block: Arc<Block>, header_accumulated_data: BlockHeaderAccumulatedData) -> &mut Self {
+        self.operations.push(WriteOperation::InsertBlock{block,  accum_data: Box::new(header_accumulated_data)});
         self
     }
 
@@ -177,8 +178,8 @@ impl DbTransaction {
 pub enum WriteOperation {
     SetMetadata(MetadataKey, MetadataValue),
     InsertOrphanBlock(Arc<Block>),
-    InsertHeader{ header: Box<BlockHeader>, achieved_difficulty: Difficulty},
-    InsertBlock{block: Arc<Block>, achieved_difficulty: Difficulty},
+    InsertHeader{ header: Box<BlockHeader>, accum_data: Box<BlockHeaderAccumulatedData>},
+    InsertBlock{block: Arc<Block>, accum_data: Box<BlockHeaderAccumulatedData>},
     InsertInput {
         header_hash: HashOutput,
         input: Box<TransactionInput>,

@@ -34,6 +34,7 @@ use serde::{
 use std::fmt;
 use tari_mmr::pruned_hashset::PrunedHashSet;
 use crate::proof_of_work::Difficulty;
+use crate::blocks::BlockHeader;
 
 #[derive(Debug)]
 pub struct BlockAccumulatedData {
@@ -217,9 +218,22 @@ impl<'de> Visitor<'de> for BlockAccumulatedDataVisitor {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+// TODO: Find a beeter name and move into `core::blocks` mod
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct BlockHeaderAccumulatedData {
     pub hash: HashOutput,
     pub total_kernel_offset: BlindingFactor,
-    pub achieved_difficulty: Difficulty
+    pub achieved_difficulty: Difficulty,
+    pub total_accumulated_difficulty: u128,
+    /// The total accumulated difficulty for each proof of work algorithms for all blocks since Genesis,
+/// but not including this block, tracked separately.
+    pub accumulated_monero_difficulty: Difficulty,
+    pub accumulated_blake_difficulty: Difficulty,
+    /// The target difficulty for solving the current block using the specified proof of work algorithm.
+    pub target_difficulty: Difficulty,
+}
+
+pub struct ChainHeader {
+    pub header: BlockHeader,
+    pub accumulated_data: BlockHeaderAccumulatedData
 }

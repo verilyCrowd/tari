@@ -26,6 +26,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
+use crate::proof_of_work::Difficulty;
 
 /// The new block template is used constructing a new partial block, allowing a miner to added the coinbase utxo and as
 /// a final step the Base node to add the MMR roots to the header.
@@ -35,11 +36,11 @@ pub struct NewBlockTemplate {
     pub body: AggregateBody,
 }
 
-impl From<Block> for NewBlockTemplate {
-    fn from(block: Block) -> Self {
+impl NewBlockTemplate {
+    pub fn from_block(block: Block, target_difficulty: Difficulty) -> Self {
         let Block { header, body } = block;
         Self {
-            header: header.into(),
+            header: NewBlockHeaderTemplate::from_header(header, target_difficulty),
             body,
         }
     }

@@ -30,7 +30,7 @@
 mod tests;
 
 mod accumulated_data;
-pub use accumulated_data::{BlockAccumulatedData, BlockHeaderAccumulatedData};
+pub use accumulated_data::{BlockAccumulatedData, BlockHeaderAccumulatedData, ChainHeader};
 
 pub mod async_db;
 

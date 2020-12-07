@@ -24,7 +24,6 @@
 mod test;
 
 mod headers;
-pub use headers::HeaderValidator;
 
 mod header_iter;
 
@@ -39,18 +38,21 @@ use crate::{
     validation::{Validation, Validator},
 };
 use std::{fmt, sync::Arc};
+use crate::base_node::validators::headers::HeaderValidator;
+use crate::validation::HeaderValidation;
+use crate::validation::FinalHeaderStateValidation;
 
 #[derive(Clone)]
 pub struct SyncValidators {
-    pub header: Arc<HeaderValidator>,
-    pub final_state: Arc<Validator<BlockHeader>>,
+    pub header: Arc<dyn HeaderValidation>,
+    pub final_state: Arc<dyn FinalHeaderStateValidation>,
 }
 
 impl SyncValidators {
     pub fn new<THeader, TFinal>(header: THeader, final_state: TFinal) -> Self
     where
-        THeader: HeaderValidator + 'static,
-        TFinal: Validation<BlockHeader> + 'static,
+        THeader: HeaderValidation + 'static,
+        TFinal: FinalHeaderStateValidation + 'static,
     {
         Self {
             header: Arc::new(Box::new(header)),

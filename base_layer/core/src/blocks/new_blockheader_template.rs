@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Error, Formatter};
 use tari_common_types::types::BlockHash;
 use tari_crypto::tari_utilities::hex::Hex;
+use crate::proof_of_work::Difficulty;
 
 /// The NewBlockHeaderTemplate is used for the construction of a new mineable block. It contains all the metadata for
 /// the block that the Base Node is able to complete on behalf of a Miner.
@@ -46,16 +47,19 @@ pub struct NewBlockHeaderTemplate {
     pub total_kernel_offset: BlindingFactor,
     /// Proof of work summary
     pub pow: ProofOfWork,
+    /// Target difficulty for this block template
+    pub target_difficulty: Difficulty,
 }
 
-impl From<BlockHeader> for NewBlockHeaderTemplate {
-    fn from(header: BlockHeader) -> Self {
+impl NewBlockHeaderTemplate {
+    pub(crate) fn from_header(header: BlockHeader, target_difficulty: Difficulty) -> Self {
         Self {
             version: header.version,
             height: header.height,
             prev_hash: header.prev_hash,
             total_kernel_offset: header.total_kernel_offset,
             pow: header.pow,
+            target_difficulty
         }
     }
 }
@@ -63,10 +67,11 @@ impl From<BlockHeader> for NewBlockHeaderTemplate {
 impl Display for NewBlockHeaderTemplate {
     fn fmt(&self, fmt: &mut Formatter<'_>) -> Result<(), Error> {
         let msg = format!(
-            "Version: {}\nBlock height: {}\nPrevious block hash: {}\n",
+            "Version: {}\nBlock height: {}\nPrevious block hash: {}\nTarget Difficulty: {}\n",
             self.version,
             self.height,
             self.prev_hash.to_hex(),
+            self.target_difficulty,
         );
         fmt.write_str(&msg)?;
         fmt.write_str(&format!(

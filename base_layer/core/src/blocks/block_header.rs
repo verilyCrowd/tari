@@ -130,10 +130,8 @@ impl BlockHeader {
     /// previous block hash is set, and the timestamp is set to the current time and the proof of work is partially
     /// initialized, although the `accumulated_difficulty_<algo>` stats are updated using the previous block's proof
     /// of work information.
-    pub fn from_previous(prev: &BlockHeader, prev_accumulated_data: &BlockHeaderAccumulatedData) -> Result<BlockHeader, BlockHeaderValidationError> {
+    pub fn from_previous(prev: &BlockHeader) -> Result<BlockHeader, BlockHeaderValidationError> {
         let prev_hash = prev.hash();
-        let mut pow = ProofOfWork::default();
-        pow.add_difficulty(&prev.pow, prev_accumulated_data.achieved_difficulty);
         Ok(BlockHeader {
             version: prev.version,
             height: prev.height + 1,
@@ -144,27 +142,8 @@ impl BlockHeader {
             kernel_mr: vec![0; BLOCK_HASH_LENGTH],
             total_kernel_offset: BlindingFactor::default(),
             nonce: 0,
-            pow,
+            pow:  ProofOfWork::default(),
         })
-    }
-
-    /// Calculates and returns the achieved difficulty for this header and associated proof of work.
-    pub fn achieved_difficulty(&self) -> Result<Difficulty, PowError> {
-        ProofOfWork::achieved_difficulty(self)
-    }
-
-    /// Calculates the total accumulated difficulty for the blockchain from the genesis block up until (and including)
-    /// this block.
-    pub fn total_accumulated_difficulty_inclusive_squared(&self) -> Result<u128, PowError> {
-        Ok(self.get_proof_of_work()?.total_accumulated_difficulty())
-    }
-
-    /// Gets the accumulated `ProofOfWork` from the genesis block up until (and including) this block.
-    ///
-    /// This function is fallible because it calculates the achieved difficulty.
-    pub fn get_proof_of_work(&self) -> Result<ProofOfWork, PowError> {
-        let difficulty = ProofOfWork::achieved_difficulty(self)?;
-        Ok(ProofOfWork::new_from_difficulty(&self.pow, difficulty))
     }
 
     pub fn into_builder(self) -> BlockBuilder {
@@ -219,11 +198,6 @@ impl BlockHeader {
     #[inline]
     pub fn timestamp(&self) -> EpochTime {
         self.timestamp
-    }
-
-    #[inline]
-    pub fn target_difficulty(&self) -> Difficulty {
-        self.pow.target_difficulty
     }
 
     #[inline]
