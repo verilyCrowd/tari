@@ -1,29 +1,105 @@
-use std::collections::HashMap;
-use randomx_rs::{RandomXVM, RandomXCache, RandomXDataset, RandomXFlag};
-use std::sync::{Mutex, MutexGuard};
-use std::time::Instant;
 use crate::proof_of_work::monero_rx::MergeMineError;
+use randomx_rs::{RandomXCache, RandomXDataset, RandomXFlag, RandomXVM, RandomXError};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, RwLock},
+    time::Instant,
+};
 
-const MAX_VMS :usize = 5;
+const MAX_VMS: usize = 5;
 
+#[derive(Default)]
+pub struct RandomXConfig {
+    pub use_large_pages: bool,
+}
+
+impl From<&RandomXConfig> for RandomXFlag {
+    fn from(source: &RandomXConfig) -> Self {
+        let mut result = RandomXFlag::default();
+        if source.use_large_pages {
+            result = result | RandomXFlag::FLAG_LARGE_PAGES
+        }
+        result
+    }
+}
+
+#[derive(Clone)]
+pub struct RandomXVMInstance {
+    // Note: If the cache and dataset drops, the vm will be wonky, so have to store all
+    // three for now
+    instance: Arc<Mutex<(RandomXVM, RandomXCache, RandomXDataset)>>
+}
+
+impl RandomXVMInstance{
+    // Note: Can maybe even get more gains by creating a new VM and sharing the dataset and cache
+    pub fn new(key: &[u8]) -> Result<Self, RandomXError> {
+        let flags = RandomXFlag::get_recommended_flags();
+        let cache = RandomXCache::new(flags, key)?;
+        let dataset = RandomXDataset::new(flags, &cache, 0)?;
+        let vm = RandomXVM::new(flags, Some(&cache), Some(&dataset))?;
+
+        Ok(Self{
+            instance: Arc::new(Mutex::new((vm,  cache, dataset)))
+        })
+
+    }
+
+    pub fn calculate_hash(&self, input: &[u8]) -> Result<Vec<u8>, RandomXError>  {
+        self.instance.lock().unwrap().0.calculate_hash(input)
+    }
+}
+
+
+unsafe impl Send for RandomXVMInstance {}
+unsafe impl Sync for RandomXVMInstance {}
+
+// Thread safe impl of the inner impl
 pub struct RandomXFactory {
-    vms : HashMap<Vec<u8>, (Instant, Mutex<RandomXVM>)>
+    inner: Arc<RwLock<RandomXFactoryInner>>,
 }
 
 impl RandomXFactory {
-    pub fn create(&mut self, key: &Vec<u8>) -> Result<MutexGuard<RandomXVM>, MergeMineError>  {
+    pub fn new(config: RandomXConfig) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(RandomXFactoryInner::new(config))),
+        }
+    }
 
+    pub fn create(&self, key: &Vec<u8>) -> Result<RandomXVMInstance, MergeMineError> {
+        let res;
+        {
+            let mut inner = self.inner.write().unwrap();
+            res = inner.create(key)?;
+        }
+        Ok(res)
+    }
+}
+
+
+struct RandomXFactoryInner {
+    config: RandomXConfig,
+    vms: HashMap<Vec<u8>, (Instant,RandomXVMInstance)>,
+}
+
+impl RandomXFactoryInner {
+    pub fn new(config: RandomXConfig) -> Self {
+        Self {
+            config,
+            vms: Default::default(),
+        }
+    }
+
+    pub fn create(&mut self, key: &Vec<u8>) -> Result<RandomXVMInstance, MergeMineError> {
         if let Some(entry) = self.vms.get_mut(key) {
-            let vm = entry.1.lock().unwrap();
+            let vm = entry.1.clone();
             entry.0 = Instant::now();
             return Ok(vm);
         }
 
-        if self.vms.len() > MAX_VMS {
-
+        if self.vms.len() + 1 > MAX_VMS {
             let mut oldest_value = Instant::now();
-            let  mut oldest_key = None;
-            for (k, v) in  self.vms {
+            let mut oldest_key = None;
+            for (k, v) in self.vms.iter() {
                 if v.0 < oldest_value {
                     oldest_key = Some(k.clone());
                 }
@@ -33,15 +109,12 @@ impl RandomXFactory {
             }
         }
 
-        let flags = RandomXFlag::get_recommended_flags();
-        let cache = RandomXCache::new(flags, &key)?;
-        let dataset = RandomXDataset::new(flags, &cache, 0)?;
-        let vm = RandomXVM::new(flags, Some(&cache), Some(&dataset))?;
+        // TODO: put config in.
 
-        let  mutex = Mutex::new(vm);
-        let res = mutex.lock().unwrap();
-        self.vms.insert(key.clone(),  (Instant::now(), mutex));
+        let vm = RandomXVMInstance::new(&key)?;
 
-        Ok(res)
+        self.vms.insert(key.clone(), (Instant::now(), vm.clone()));
+
+        Ok(vm)
     }
 }

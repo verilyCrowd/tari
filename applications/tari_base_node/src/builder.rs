@@ -64,6 +64,7 @@ use tokio::{
     task,
     time::delay_for,
 };
+use tari_core::proof_of_work::randomx_factory::{RandomXFactory, RandomXConfig};
 
 const LOG_TARGET: &str = "c::bn::initialization";
 
@@ -302,7 +303,7 @@ async fn build_node_context(
     let rules = ConsensusManagerBuilder::new(config.network.into()).build();
     let factories = CryptoFactories::default();
     let validators = Validators::new(
-        FullConsensusValidator::new(rules.clone()),
+        FullConsensusValidator::new(rules.clone(), RandomXFactory::new(RandomXConfig::default())),
         StatelessBlockValidator::new(rules.clone(), factories.clone()),
     );
     let db_config = BlockchainDatabaseConfig {

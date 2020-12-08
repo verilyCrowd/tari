@@ -29,6 +29,7 @@ use crate::{
         BlockchainBackend,
         BlockchainDatabase,
         BlockchainDatabaseConfig,
+        ChainHeader,
         ChainStorageError,
         DbKey,
         DbTransaction,
@@ -44,6 +45,7 @@ use crate::{
         ConsensusManagerBuilder,
         Network,
     },
+    proof_of_work::randomx_factory::{RandomXConfig, RandomXFactory},
     transactions::{
         transaction::{TransactionInput, TransactionKernel, TransactionOutput},
         types::{CryptoFactories, HashOutput},
@@ -80,8 +82,9 @@ pub fn create_new_blockchain() -> BlockchainDatabase<TempDatabase> {
 }
 
 fn genesis_template() -> NewBlockTemplate {
-    let header = BlockHeader::new(0);
-    header.into_builder().build().into()
+    // let header = BlockHeader::new(0);
+    // header.into_builder().build().into()
+    unimplemented!("Need to add the difficulty back here")
 }
 
 pub fn create_store_with_consensus_and_validators(
@@ -96,7 +99,10 @@ pub fn create_store_with_consensus_and_validators(
 pub fn create_store_with_consensus(rules: &ConsensusManager) -> BlockchainDatabase<TempDatabase> {
     let factories = CryptoFactories::default();
     let validators = Validators::new(
-        FullConsensusValidator::new(rules.clone()),
+        FullConsensusValidator::new(
+            rules.clone(),
+            RandomXFactory::new(RandomXConfig { use_large_pages: true }),
+        ),
         StatelessBlockValidator::new(rules.clone(), factories),
     );
     create_store_with_consensus_and_validators(rules, validators)
@@ -158,7 +164,11 @@ impl BlockchainBackend for TempDatabase {
         self.db.contains(key)
     }
 
-    fn fetch_header_and_accumulated_data(&self, height: u64) -> Result<(BlockHeader, BlockHeaderAccumulatedData), ChainStorageError> {
+    fn fetch_header_and_accumulated_data(
+        &self,
+        height: u64,
+    ) -> Result<(BlockHeader, BlockHeaderAccumulatedData), ChainStorageError>
+    {
         self.db.fetch_header_and_accumulated_data(height)
     }
 
@@ -243,6 +253,10 @@ impl BlockchainBackend for TempDatabase {
         self.db.fetch_last_header()
     }
 
+    fn fetch_tip_header(&self) -> Result<ChainHeader, ChainStorageError> {
+        self.db.fetch_tip_header()
+    }
+
     fn fetch_chain_metadata(&self) -> Result<ChainMetadata, ChainStorageError> {
         self.db.fetch_chain_metadata()
     }
@@ -255,12 +269,20 @@ impl BlockchainBackend for TempDatabase {
         self.db.count_kernels()
     }
 
-    fn fetch_orphan_chain_tips(&self) -> Result<Vec<HashOutput>, ChainStorageError> {
+    fn fetch_orphan_chain_tips(&self) -> Result<Vec<ChainHeader>, ChainStorageError> {
         self.db.fetch_orphan_chain_tips()
     }
 
     fn fetch_orphan_children_of(&self, hash: HashOutput) -> Result<Vec<HashOutput>, ChainStorageError> {
         self.db.fetch_orphan_children_of(hash)
+    }
+
+    fn fetch_orphan_header_accumulated_data(
+        &self,
+        hash: HashOutput,
+    ) -> Result<BlockHeaderAccumulatedData, ChainStorageError>
+    {
+        self.fetch_orphan_header_accumulated_data(hash)
     }
 
     fn delete_oldest_orphans(

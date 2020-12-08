@@ -48,6 +48,7 @@ use tari_core::{
         mocks::MockValidator,
     },
 };
+use tari_core::proof_of_work::randomx_factory::{RandomXFactory, RandomXConfig};
 
 pub const LOG_TARGET: &str = "base_node::app";
 
@@ -92,7 +93,7 @@ pub async fn run_recovery(node_config: &GlobalConfig) -> Result<(), anyhow::Erro
     let rules = ConsensusManagerBuilder::new(node_config.network.into()).build();
     let factories = CryptoFactories::default();
     let validators = Validators::new(
-        FullConsensusValidator::new(rules.clone()),
+        FullConsensusValidator::new(rules.clone(), RandomXFactory::new(RandomXConfig::default())),
         StatelessBlockValidator::new(rules.clone(), factories.clone()),
     );
     let db_config = BlockchainDatabaseConfig {

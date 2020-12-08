@@ -22,11 +22,11 @@
 
 use crate::{
     blocks::{new_blockheader_template::NewBlockHeaderTemplate, Block},
+    proof_of_work::Difficulty,
     transactions::aggregated_body::AggregateBody,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
-use crate::proof_of_work::Difficulty;
 
 /// The new block template is used constructing a new partial block, allowing a miner to added the coinbase utxo and as
 /// a final step the Base node to add the MMR roots to the header.

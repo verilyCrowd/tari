@@ -156,7 +156,7 @@ pub async fn create_wallet(
         factories,
         None,
         None,
-        Network::Rincewind,
+        Network::Ridcully,
         None,
         None,
         None,

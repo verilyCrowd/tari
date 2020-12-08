@@ -23,9 +23,11 @@
 use crate::{
     blocks::{Block, BlockHeader, NewBlockTemplate},
     chain_storage::{
+        accumulated_data::BlockHeaderAccumulatedData,
         blockchain_database::BlockAddResult,
         BlockchainBackend,
         BlockchainDatabase,
+        ChainBlock,
         ChainStorageError,
         DbTransaction,
         HistoricalBlock,
@@ -43,13 +45,11 @@ use crate::{
         types::{Commitment, HashOutput, Signature},
     },
 };
-use crate::chain_storage::accumulated_data::BlockHeaderAccumulatedData;
 use log::*;
 use rand::{rngs::OsRng, RngCore};
 use std::{mem, ops::RangeBounds, sync::Arc, time::Instant};
 use tari_common_types::{chain_metadata::ChainMetadata, types::BlockHash};
 use tari_mmr::Hash;
-use crate::proof_of_work::Difficulty;
 
 const LOG_TARGET: &str = "c::bn::async_db";
 
@@ -152,7 +152,7 @@ impl<B: BlockchainBackend + 'static> AsyncBlockchainDb<B> {
 
     make_async_fn!(insert_mmr_node(tree: MmrTree, hash: Hash, deleted: bool) -> (), "insert_mmr_node");
 
-    make_async_fn!(rewind_to_height(height: u64) -> Vec<Arc<Block>>, "rewind_to_height");
+    make_async_fn!(rewind_to_height(height: u64) -> Vec<Arc<ChainBlock>>, "rewind_to_height");
 
     //---------------------------------- Headers --------------------------------------------//
     make_async_fn!(fetch_header(height: u64) -> Option<BlockHeader>, "fetch_header");
@@ -252,8 +252,8 @@ impl<'a, B: BlockchainBackend + 'static> AsyncDbTransaction<'a, B> {
     /// Add the BlockHeader and contents of a `Block` (i.e. inputs, outputs and kernels) to the database.
     /// If the `BlockHeader` already exists, then just the contents are updated along with the relevant accumulated
     /// data.
-    pub fn insert_block(&mut self, block: Arc<Block>, accum_data: BlockHeaderAccumulatedData) -> &mut Self {
-        self.transaction.insert_block(block, accum_data);
+    pub fn insert_block(&mut self, block: Arc<ChainBlock>) -> &mut Self {
+        self.transaction.insert_block(block);
         self
     }
 

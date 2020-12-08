@@ -22,7 +22,7 @@
 
 use crate::{
     blocks::BlockHeader,
-    proof_of_work::{difficulty::util::little_endian_difficulty, Difficulty},
+    proof_of_work::{difficulty::util::little_endian_difficulty, randomx_factory::RandomXFactory, Difficulty},
     tari_utilities::ByteArray,
 };
 use log::*;
@@ -35,7 +35,7 @@ use monero::{
     consensus::{encode::VarInt, serialize},
     cryptonote::hash::{Hash, Hashable},
 };
-use randomx_rs::{RandomXCache, RandomXDataset, RandomXError, RandomXFlag, RandomXVM};
+use randomx_rs::{RandomXError};
 use serde::{Deserialize, Serialize};
 use std::{
     fmt::{Display, Error, Formatter},
@@ -43,7 +43,7 @@ use std::{
 };
 use tari_crypto::tari_utilities::hex::{from_hex, Hex, HexError};
 use thiserror::Error;
-use crate::proof_of_work::randomx_factory::RandomXFactory;
+use crate::proof_of_work::randomx_factory::RandomXVMInstance;
 
 pub const LOG_TARGET: &str = "c::pow::monero_rx";
 
@@ -193,7 +193,7 @@ impl MoneroData {
 
 /// Internal function to calculate the difficulty attained for the given block Deserialized the Monero header from the
 /// provided header
-pub fn monero_difficulty(header: &BlockHeader) -> Result<Difficulty, MergeMineError> {
+pub fn monero_difficulty(header: &BlockHeader, randomx_factory: &RandomXFactory) -> Result<Difficulty, MergeMineError> {
     let monero = MoneroData::from_header(header)?;
     verify_header(&header, &monero)?;
 
@@ -209,20 +209,12 @@ pub fn monero_difficulty(header: &BlockHeader) -> Result<Difficulty, MergeMineEr
     debug!(target: LOG_TARGET, "RandomX input: {}", input);
     let input = from_hex(&input)?;
     let key_bytes = from_hex(&key)?;
-    get_random_x_difficulty(&input, &key_bytes).map(|(diff, _)| diff)
+    let vm = randomx_factory.create(&key_bytes)?;
+    get_random_x_difficulty(&input, &vm).map(|(diff, _)| diff)
 }
 
-fn get_random_x_difficulty(input: &[u8], key: &[u8]) -> Result<(Difficulty, Vec<u8>), MergeMineError> {
-
-    let vm = RandomXFactory::create(&key);
+fn get_random_x_difficulty(input: &[u8], vm: &RandomXVMInstance) -> Result<(Difficulty, Vec<u8>), MergeMineError> {
     let hash = vm.calculate_hash(&input)?;
-    debug!(
-        target: LOG_TARGET,
-        "Monero hash: {}, key: {}",
-        hash.to_hex(),
-        Vec::from(key).to_hex()
-    );
-    // ToDo remove this post testnet. This is to fix wrongly calculated monero blocks
     let difficulty = little_endian_difficulty(&hash);
     Ok((difficulty, hash))
 }

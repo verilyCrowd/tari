@@ -42,8 +42,7 @@ use crate::{
 use log::*;
 use std::cmp;
 use tari_common_types::chain_metadata::ChainMetadata;
-use tari_crypto::tari_utilities::Hashable;
-use tari_crypto::tari_utilities::hex::Hex;
+use tari_crypto::tari_utilities::{hex::Hex, Hashable};
 use thiserror::Error;
 use tokio::{task, task::spawn_blocking};
 
@@ -286,21 +285,28 @@ impl<B: BlockchainBackend + 'static> HeaderSynchronisation<'_, '_, B> {
         // Validate and insert each header
         let validator = self.shared.sync_validators.header.clone();
         let db = self.db();
-        let accum_data = db.fetch_header_accumulated_data(first_header.prev_hash.clone()).await?.ok_or_else(|| ChainStorageError::ValueNotFound {
-            entity: "Matching previous header".to_string(),
-            field: "hash".to_string(),
-            value: first_header.prev_hash.to_hex()
-        })?;
+        let accum_data = db
+            .fetch_header_accumulated_data(first_header.prev_hash.clone())
+            .await?
+            .ok_or_else(|| ChainStorageError::ValueNotFound {
+                entity: "Matching previous header".to_string(),
+                field: "hash".to_string(),
+                value: first_header.prev_hash.to_hex(),
+            })?;
         let prev_header = first_header.clone();
         spawn_blocking(move || -> Result<(), HeaderSyncError> {
             let mut accum_data = accum_data;
             let mut prev_header = prev_header;
             for header in headers {
-                accum_data = validator
+                let accum_data_builder = validator
                     .validate(&header, &prev_header, &accum_data)
                     .map_err(HeaderSyncError::HeaderValidationFailed)?;
 
-                db.inner().insert_valid_headers(vec![(header.clone(), accum_data.clone())])?;
+                accum_data = accum_data_builder
+                    .total_kernel_offset(&accum_data.total_kernel_offset, &header.total_kernel_offset)
+                    .build()?;
+                db.inner()
+                    .insert_valid_headers(vec![(header.clone(), accum_data.clone())])?;
                 prev_header = header;
             }
             Ok(())

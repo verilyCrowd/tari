@@ -26,30 +26,32 @@ use crate::{
     proof_of_work::{PowAlgorithm, ProofOfWork},
 };
 
-use crate::transactions::{
-    aggregated_body::AggregateBody,
-    bullet_rangeproofs::BulletRangeProof,
-    tari_amount::MicroTari,
-    transaction::{KernelFeatures, OutputFeatures, OutputFlags, TransactionKernel, TransactionOutput},
-    types::{Commitment, PrivateKey, PublicKey, Signature},
+use crate::{
+    chain_storage::{BlockHeaderAccumulatedData, ChainBlock},
+    transactions::{
+        aggregated_body::AggregateBody,
+        bullet_rangeproofs::BulletRangeProof,
+        tari_amount::MicroTari,
+        transaction::{KernelFeatures, OutputFeatures, OutputFlags, TransactionKernel, TransactionOutput},
+        types::{Commitment, PrivateKey, PublicKey, Signature},
+    },
 };
 use tari_crypto::tari_utilities::{hash::Hashable, hex::*};
-use crate::chain_storage::BlockHeaderAccumulatedData;
 
-pub fn get_mainnet_genesis_block() -> (Block, BlockHeaderAccumulatedData) {
+pub fn get_mainnet_genesis_block() -> ChainBlock {
     unimplemented!()
 }
 
 pub fn get_mainnet_block_hash() -> Vec<u8> {
-    get_mainnet_genesis_block().hash()
+    get_mainnet_genesis_block().accumulated_data.hash
 }
 
 pub fn get_mainnet_gen_header() -> BlockHeader {
-    get_mainnet_genesis_block().header
+    get_mainnet_genesis_block().block.header
 }
 
 /// This will get the ridcully gen block
-pub fn get_ridcully_genesis_block() -> (Block, BlockHeaderAccumulatedData) {
+pub fn get_ridcully_genesis_block() -> ChainBlock {
     // lets get the block
     let mut block = get_ridcully_genesis_block_raw();
     // Lets load in the ridcully faucet tx's
@@ -73,16 +75,19 @@ pub fn get_ridcully_genesis_block() -> (Block, BlockHeaderAccumulatedData) {
     block.header.kernel_mr = from_hex("f5e08e66e9c0e5e3818d96a694f4f6eafd689f38cea2e52e771eab2cc7a3941a").unwrap();
     block.body.add_outputs(&mut utxos);
     block.body.add_kernels(&mut vec![kernel.unwrap()]);
-    let accum_data = BlockHeaderAccumulatedData{
+    let accumulated_data = BlockHeaderAccumulatedData {
         hash: block.hash(),
         total_kernel_offset: block.header.total_kernel_offset.clone(),
         achieved_difficulty: 1.into(),
-        total_accumulated_difficulty: 1.into(),
+        total_accumulated_difficulty: 1,
         accumulated_monero_difficulty: 1.into(),
         accumulated_blake_difficulty: 1.into(),
-        target_difficulty: 1.into()
+        target_difficulty: 1.into(),
     };
-    (block, accum_data)
+    ChainBlock {
+        block,
+        accumulated_data,
+    }
 }
 
 pub fn get_ridcully_genesis_block_raw() -> Block {
@@ -141,15 +146,14 @@ pub fn get_ridcully_genesis_block_raw() -> Block {
         },
         body,
     }
-
 }
 
 pub fn get_ridcully_block_hash() -> Vec<u8> {
-    get_ridcully_genesis_block().hash()
+    get_ridcully_genesis_block().accumulated_data.hash
 }
 
 pub fn get_ridcully_gen_header() -> BlockHeader {
-    get_ridcully_genesis_block().header
+    get_ridcully_genesis_block().block.header
 }
 
 #[cfg(test)]

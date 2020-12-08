@@ -20,9 +20,11 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use crate::validation::{and_then::AndThenValidator, error::ValidationError};
-use crate::blocks::BlockHeader;
-use crate::chain_storage::BlockHeaderAccumulatedData;
+use crate::{
+    blocks::BlockHeader,
+    chain_storage::{BlockHeaderAccumulatedData, BlockHeaderAccumulatedDataBuilder},
+    validation::{and_then::AndThenValidator, error::ValidationError},
+};
 
 pub type StatefulValidator<T, B> = Box<dyn StatefulValidation<T, B>>;
 pub type Validator<T> = Box<dyn Validation<T>>;
@@ -41,8 +43,13 @@ pub trait Validation<T>: Send + Sync {
     fn validate(&self, item: &T) -> Result<(), ValidationError>;
 }
 
-pub trait HeaderValidation : Send + Sync {
-    fn validate(&self, header: &BlockHeader, previous_header: &BlockHeader, previous_data: &BlockHeaderAccumulatedData) -> Result<BlockHeaderAccumulatedData, ValidationError>;
+pub trait HeaderValidation: Send + Sync {
+    fn validate(
+        &self,
+        header: &BlockHeader,
+        previous_header: &BlockHeader,
+        previous_data: &BlockHeaderAccumulatedData,
+    ) -> Result<BlockHeaderAccumulatedDataBuilder, ValidationError>;
 }
 
 pub trait FinalHeaderStateValidation: Send + Sync {

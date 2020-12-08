@@ -62,4 +62,4 @@ pub use target_difficulty::TargetDifficultyWindow;
 pub mod lwma_diff;
 
 #[cfg(feature = "base_node")]
-mod randomx_factory;
+pub mod randomx_factory;

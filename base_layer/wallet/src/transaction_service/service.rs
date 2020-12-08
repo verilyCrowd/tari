@@ -1923,7 +1923,7 @@ where
         let (ts_request_sender, _ts_request_receiver) = reply_channel::unbounded();
         let (event_publisher, _) = broadcast::channel(100);
         let ts_handle = TransactionServiceHandle::new(ts_request_sender, event_publisher.clone());
-        let constants = ConsensusConstantsBuilder::new(Network::Rincewind).build();
+        let constants = ConsensusConstantsBuilder::new(Network::Ridcully).build();
         let shutdown = Shutdown::new();
         let mut fake_oms = OutputManagerService::new(
             OutputManagerServiceConfig::default(),

@@ -31,21 +31,19 @@ mod chain_balance;
 pub use chain_balance::ChainBalanceValidator;
 
 use crate::{
-    blocks::BlockHeader,
+    base_node::validators::headers::HeaderValidator,
     chain_storage::{BlockchainBackend, BlockchainDatabase},
     consensus::ConsensusManager,
     transactions::types::CryptoFactories,
-    validation::{Validation, Validator},
+    validation::{FinalHeaderStateValidation, HeaderValidation},
 };
 use std::{fmt, sync::Arc};
-use crate::base_node::validators::headers::HeaderValidator;
-use crate::validation::HeaderValidation;
-use crate::validation::FinalHeaderStateValidation;
+use crate::proof_of_work::randomx_factory::RandomXFactory;
 
 #[derive(Clone)]
 pub struct SyncValidators {
-    pub header: Arc<dyn HeaderValidation>,
-    pub final_state: Arc<dyn FinalHeaderStateValidation>,
+    pub header: Arc<Box<dyn HeaderValidation>>,
+    pub final_state: Arc<Box<dyn FinalHeaderStateValidation>>,
 }
 
 impl SyncValidators {
@@ -64,10 +62,11 @@ impl SyncValidators {
         db: BlockchainDatabase<B>,
         rules: ConsensusManager,
         factories: CryptoFactories,
+        randomx_factory: RandomXFactory
     ) -> Self
     {
         Self::new(
-            HeaderValidator::new(db.clone()),
+            HeaderValidator::new(db.clone(), randomx_factory),
             ChainBalanceValidator::new(db, rules, factories),
         )
     }

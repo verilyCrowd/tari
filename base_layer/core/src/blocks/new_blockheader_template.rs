@@ -22,14 +22,13 @@
 
 use crate::{
     blocks::block_header::{hash_serializer, BlockHeader},
-    proof_of_work::ProofOfWork,
+    proof_of_work::{Difficulty, ProofOfWork},
     transactions::types::BlindingFactor,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Error, Formatter};
 use tari_common_types::types::BlockHash;
 use tari_crypto::tari_utilities::hex::Hex;
-use crate::proof_of_work::Difficulty;
 
 /// The NewBlockHeaderTemplate is used for the construction of a new mineable block. It contains all the metadata for
 /// the block that the Base Node is able to complete on behalf of a Miner.
@@ -59,7 +58,7 @@ impl NewBlockHeaderTemplate {
             prev_hash: header.prev_hash,
             total_kernel_offset: header.total_kernel_offset,
             pow: header.pow,
-            target_difficulty
+            target_difficulty,
         }
     }
 }

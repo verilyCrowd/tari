@@ -19,23 +19,13 @@
 // SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-use crate::{
-    blocks::BlockHeader,
-    proof_of_work::{
-        monero_rx::{monero_difficulty, MoneroData},
-        sha3_pow::sha3_difficulty,
-        Difficulty,
-        PowAlgorithm,
-        PowError,
-    },
-};
+use crate::proof_of_work::{monero_rx::MoneroData, Difficulty, PowAlgorithm};
 use bytes::BufMut;
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Error, Formatter};
 use tari_crypto::tari_utilities::hex::Hex;
 
 pub trait AchievedDifficulty {}
-
 
 /// The proof of work data structure that is included in the block header. There's some non-Rustlike redundancy here
 /// to make serialization more straightforward
@@ -57,6 +47,9 @@ pub struct ProofOfWork {
 impl Default for ProofOfWork {
     fn default() -> Self {
         Self {
+            accumulated_monero_difficulty: Default::default(),
+            accumulated_blake_difficulty: Default::default(),
+            target_difficulty: Default::default(),
             pow_algo: PowAlgorithm::Sha3,
             pow_data: vec![],
         }
@@ -68,12 +61,9 @@ impl ProofOfWork {
     pub fn new(pow_algo: PowAlgorithm) -> Self {
         Self {
             pow_algo,
-            pow_data: vec![],
+            ..Default::default()
         }
     }
-
-
-
 
     /// Serialises the ProofOfWork instance into a byte string. Useful for feeding the PoW into a hash function.
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -97,11 +87,7 @@ impl Display for PowAlgorithm {
 
 impl Display for ProofOfWork {
     fn fmt(&self, fmt: &mut Formatter<'_>) -> Result<(), Error> {
-        writeln!(
-            fmt,
-            "Mining algorithm: {}",
-            self.pow_algo
-        )?;
+        writeln!(fmt, "Mining algorithm: {}", self.pow_algo)?;
 
         match self.pow_algo {
             PowAlgorithm::Monero => match MoneroData::from_pow_data(&self.pow_data) {

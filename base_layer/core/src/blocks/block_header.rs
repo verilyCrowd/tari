@@ -39,7 +39,7 @@
 
 use crate::{
     blocks::{BlockBuilder, NewBlockHeaderTemplate},
-    proof_of_work::{Difficulty, PowAlgorithm, PowError, ProofOfWork},
+    proof_of_work::{PowAlgorithm, PowError, ProofOfWork},
     transactions::types::{BlindingFactor, HashDigest},
 };
 use chrono::{DateTime, Utc};
@@ -58,7 +58,6 @@ use std::{
 use tari_common_types::types::{BlockHash, BLOCK_HASH_LENGTH};
 use tari_crypto::tari_utilities::{epoch_time::EpochTime, hex::Hex, ByteArray, Hashable};
 use thiserror::Error;
-use crate::chain_storage::BlockHeaderAccumulatedData;
 
 #[derive(Debug, Error)]
 pub enum BlockHeaderValidationError {
@@ -142,7 +141,7 @@ impl BlockHeader {
             kernel_mr: vec![0; BLOCK_HASH_LENGTH],
             total_kernel_offset: BlindingFactor::default(),
             nonce: 0,
-            pow:  ProofOfWork::default(),
+            pow: ProofOfWork::default(),
         })
     }
 

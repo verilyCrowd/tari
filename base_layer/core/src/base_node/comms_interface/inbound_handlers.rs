@@ -281,6 +281,7 @@ where T: BlockchainBackend + 'static
                         target: LOG_TARGET,
                         "A peer has requested a block with hash {}", block_hex
                     );
+
                     match self.blockchain_db.fetch_block_by_hash(block_hash).await {
                         Ok(Some(block)) => blocks.push(block),
                         Ok(None) => warn!(
@@ -374,7 +375,9 @@ where T: BlockchainBackend + 'static
             NodeCommsRequest::GetNewBlockTemplate(pow_algo) => {
                 let best_block_header = self.blockchain_db.fetch_tip_header().await?;
 
-                // let accum_data = self.blockchain_db.fetch_header_accumulated_data(best_block_header.hash()).await?.ok_or_else(|| CommsInterfaceError::InternalError("Could not find accumulated data for tip".to_string()))?;
+                // let accum_data =
+                // self.blockchain_db.fetch_header_accumulated_data(best_block_header.hash()).await?.ok_or_else(||
+                // CommsInterfaceError::InternalError("Could not find accumulated data for tip".to_string()))?;
                 let mut header = BlockHeader::from_previous(&best_block_header)?;
                 let constants = self.consensus_manager.consensus_constants(header.height);
                 header.version = constants.blockchain_version();
@@ -389,10 +392,12 @@ where T: BlockchainBackend + 'static
                 .map(|tx| (**tx).clone())
                 .collect();
 
-                let height =header.height;
+                let height = header.height;
 
-                let mut block_template =
-                    NewBlockTemplate::from_block(header.into_builder().with_transactions(transactions).build(), self.get_target_difficulty(pow_algo, height).await?);
+                let block_template = NewBlockTemplate::from_block(
+                    header.into_builder().with_transactions(transactions).build(),
+                    self.get_target_difficulty(pow_algo, height).await?,
+                );
                 debug!(
                     target: LOG_TARGET,
                     "New block template requested at height {}", block_template.header.height,

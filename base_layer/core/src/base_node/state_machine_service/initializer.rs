@@ -42,6 +42,7 @@ use std::{sync::Arc, time::Duration};
 use tari_comms::{connectivity::ConnectivityRequester, PeerManager};
 use tari_service_framework::{ServiceInitializationError, ServiceInitializer, ServiceInitializerContext};
 use tokio::sync::{broadcast, watch};
+use crate::proof_of_work::randomx_factory::{RandomXFactory, RandomXConfig};
 
 const LOG_TARGET: &str = "c::bn::state_machine_service::initializer";
 
@@ -121,7 +122,12 @@ where B: BlockchainBackend + 'static
             state_machine_config.horizon_sync_config.horizon_sync_height_offset =
                 rules.consensus_constants(0).coinbase_lock_height() + 50;
 
-            let sync_validators = SyncValidators::full_consensus(db.clone(), rules.clone(), factories.clone());
+            let sync_validators = SyncValidators::full_consensus(db.clone(), rules.clone(), factories.clone(), RandomXFactory::new(
+                // TODO: Read from config
+                RandomXConfig{
+                    use_large_pages: true
+                }
+            ));
             let node = BaseNodeStateMachine::new(
                 db.into(),
                 node_local_interface,

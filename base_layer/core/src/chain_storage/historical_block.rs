@@ -20,7 +20,7 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use crate::blocks::Block;
+use crate::{blocks::Block, chain_storage::BlockHeaderAccumulatedData};
 use serde::{Deserialize, Serialize};
 
 /// The representation of a historical block in the blockchain. It is essentially identical to a protocol-defined
@@ -32,11 +32,17 @@ pub struct HistoricalBlock {
     pub confirmations: u64,
     /// The underlying block
     pub block: Block,
+    /// Accumulated data
+    pub accumulated_data: BlockHeaderAccumulatedData,
 }
 
 impl HistoricalBlock {
-    pub fn new(block: Block, confirmations: u64) -> Self {
-        HistoricalBlock { block, confirmations }
+    pub fn new(block: Block, confirmations: u64, accumulated_data: BlockHeaderAccumulatedData) -> Self {
+        HistoricalBlock {
+            block,
+            confirmations,
+            accumulated_data,
+        }
     }
 
     pub fn confirmations(&self) -> u64 {

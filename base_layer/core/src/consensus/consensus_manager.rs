@@ -30,7 +30,7 @@ use crate::{
         },
         Block,
     },
-    chain_storage::ChainStorageError,
+    chain_storage::{ChainBlock, ChainStorageError},
     consensus::{
         chain_strength_comparer::{strongest_chain, ChainStrengthComparer},
         emission::{Emission, EmissionSchedule},
@@ -42,7 +42,6 @@ use crate::{
 };
 use std::{convert::TryFrom, sync::Arc};
 use thiserror::Error;
-use crate::chain_storage::BlockHeaderAccumulatedData;
 
 #[derive(Debug, Error)]
 pub enum ConsensusManagerError {
@@ -70,7 +69,7 @@ impl ConsensusManager {
     }
 
     /// Returns the genesis block for the selected network.
-    pub fn get_genesis_block(&self) -> (Block, BlockHeaderAccumulatedData) {
+    pub fn get_genesis_block(&self) -> ChainBlock {
         match self.inner.network {
             Network::MainNet => get_mainnet_genesis_block(),
             Network::Ridcully => get_ridcully_genesis_block(),
@@ -79,6 +78,7 @@ impl ConsensusManager {
     }
 
     /// Returns the genesis block hash for the selected network.
+    #[deprecated]
     pub fn get_genesis_block_hash(&self) -> Vec<u8> {
         match self.inner.network {
             Network::MainNet => get_mainnet_block_hash(),

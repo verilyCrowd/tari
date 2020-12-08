@@ -40,7 +40,7 @@ use crate::{
                 lmdb_insert_dup,
                 lmdb_last,
                 lmdb_len,
-                lmdb_list_keys,
+                lmdb_list_values,
                 lmdb_replace,
             },
             TransactionInputRowData,
@@ -55,10 +55,12 @@ use crate::{
             LMDB_DB_METADATA,
             LMDB_DB_ORPHANS,
             LMDB_DB_ORPHAN_CHAIN_TIPS,
+            LMDB_DB_ORPHAN_HEADER_ACCUMULATED_DATA,
             LMDB_DB_ORPHAN_PARENT_MAP_INDEX,
             LMDB_DB_TXOS_HASH_TO_INDEX,
             LMDB_DB_UTXOS,
         },
+        ChainHeader,
         MetadataKey,
     },
     transactions::{
@@ -84,7 +86,6 @@ use tari_common_types::{
 use tari_crypto::tari_utilities::{hash::Hashable, hex::Hex};
 use tari_mmr::{Hash, MerkleMountainRange, MutableMmr};
 use tari_storage::lmdb_store::{db, LMDBBuilder, LMDBConfig, LMDBStore};
-use crate::proof_of_work::Difficulty;
 
 type DatabaseRef = Arc<Database<'static>>;
 
@@ -105,6 +106,7 @@ pub struct LMDBDatabase {
     txos_hash_to_index_db: DatabaseRef,
     kernels_db: DatabaseRef,
     orphans_db: DatabaseRef,
+    orphan_header_accumulated_data_db: DatabaseRef,
     orphan_chain_tips_db: DatabaseRef,
     orphan_parent_map_index: DatabaseRef,
     is_mem_metadata_dirty: bool,
@@ -127,6 +129,7 @@ impl LMDBDatabase {
             txos_hash_to_index_db: get_database(&store, LMDB_DB_TXOS_HASH_TO_INDEX)?,
             kernels_db: get_database(&store, LMDB_DB_KERNELS)?,
             orphans_db: get_database(&store, LMDB_DB_ORPHANS)?,
+            orphan_header_accumulated_data_db: get_database(&store, LMDB_DB_ORPHAN_HEADER_ACCUMULATED_DATA)?,
             orphan_chain_tips_db: get_database(&store, LMDB_DB_ORPHAN_CHAIN_TIPS)?,
             orphan_parent_map_index: get_database(&store, LMDB_DB_ORPHAN_PARENT_MAP_INDEX)?,
             env,
@@ -150,17 +153,19 @@ impl LMDBDatabase {
                 SetMetadata(key, value) => self.set_metadata(&write_txn, key, value)?,
                 InsertOrphanBlock(block) => self.insert_orphan_block(&write_txn, &block)?,
                 Delete(delete) => self.op_delete(&write_txn, delete)?,
-                InsertHeader{header, achieved_difficulty} => {
-                    if !self.insert_header(&write_txn, &*header, achieved_difficulty)? {
+                InsertHeader { header } => {
+                    let height = header.header.height;
+                    if !self.insert_header(&write_txn, &header.header, header.accumulated_data)? {
                         return Err(ChainStorageError::InvalidOperation(format!(
                             "Duplicate `BlockHeader` key `{}`",
-                            header.height
+                            height
                         )));
                     }
                 },
-                InsertBlock{block, achieved_difficulty} => {
-                    self.insert_header(&write_txn, &block.header, achieved_difficulty)?;
-                    self.insert_block_body(&write_txn, &block.header, block.body.clone())?;
+                InsertBlock { block } => {
+                    // TODO: Sort out clones
+                    self.insert_header(&write_txn, &block.block.header, block.accumulated_data.clone())?;
+                    self.insert_block_body(&write_txn, &block.block.header, block.block.body.clone())?;
                 },
                 InsertKernel {
                     header_hash,
@@ -212,6 +217,7 @@ impl LMDBDatabase {
                     )?;
                     lmdb_delete_keys_starting_with::<TransactionInputRowData>(&write_txn, &self.inputs_db, &hash_hex)?;
                 },
+                InsertChainOrphanBlock(_) => unimplemented!(),
             }
         }
         write_txn
@@ -336,24 +342,25 @@ impl LMDBDatabase {
 
     /// Inserts the header and header accumulated data. True is returned if a new header is inserted, otherwise false if
     /// the header already exists
-    fn insert_header(&mut self, txn: &WriteTransaction<'_>, header: &BlockHeader, accum_data: BlockHeaderAccumulatedData) -> Result<bool, ChainStorageError> {
-        if lmdb_exists(txn, &self.headers_db, &header.height)? {
+    fn insert_header(
+        &mut self,
+        txn: &WriteTransaction<'_>,
+        header: &BlockHeader,
+        accum_data: BlockHeaderAccumulatedData,
+    ) -> Result<bool, ChainStorageError>
+    {
+        if let Some(current_header_at_height) = lmdb_get::<_, BlockHeader>(txn, &self.headers_db, &header.height)? {
+            let hash = current_header_at_height.hash();
+            if current_header_at_height.hash() != accum_data.hash {
+                return Err(ChainStorageError::InvalidOperation(format!(
+                    "There is a different header stored at height {} already. New header ({}), current header: ({})",
+                    header.height,
+                    hash.to_hex(),
+                    accum_data.hash.to_hex()
+                )));
+            }
             return Ok(false);
         }
-
-        let prev_data = if header.height == 0 {
-            BlockHeaderAccumulatedData::default()
-        } else {
-            self.fetch_header_accumulated_data(txn, &header.height - 1)?
-                .ok_or_else(|| ChainStorageError::ValueNotFound {
-                    entity: "HeaderAccumulatedData".to_string(),
-                    field: "height".to_string(),
-                    value: (header.height - 1).to_string(),
-                })?
-        };
-
-        let mut accum_data = accum_data;
-            accum_data.total_kernel_offset =  &header.total_kernel_offset + &prev_data.total_kernel_offset;
 
         lmdb_replace(&txn, &self.header_accumulated_data_db, &header.height, &accum_data)?;
         lmdb_insert(txn, &self.block_hashes_db, header.hash().as_slice(), &header.height)?;
@@ -537,11 +544,15 @@ impl LMDBDatabase {
         lmdb_get(&txn, &self.block_accumulated_data_db, header_hash.as_slice()).map_err(Into::into)
     }
 
-    fn fetch_header_accumulated_data_by_height(&self, height: u64, txn: &ReadTransaction) -> Result<Option<BlockHeaderAccumulatedData>, ChainStorageError> {
-        lmdb_get(&txn, &self.header_accumulated_data_db, height)
+    fn fetch_header_accumulated_data_by_height(
+        &self,
+        height: u64,
+        txn: &ReadTransaction,
+    ) -> Result<Option<BlockHeaderAccumulatedData>, ChainStorageError>
+    {
+        lmdb_get(&txn, &self.header_accumulated_data_db, &height)
     }
 }
-
 
 pub fn create_lmdb_database<P: AsRef<Path>>(path: P, config: LMDBConfig) -> Result<LMDBDatabase, ChainStorageError> {
     let flags = db::CREATE;
@@ -563,6 +574,7 @@ pub fn create_lmdb_database<P: AsRef<Path>>(path: P, config: LMDBConfig) -> Resu
         .add_database(LMDB_DB_TXOS_HASH_TO_INDEX, flags)
         .add_database(LMDB_DB_KERNELS, flags)
         .add_database(LMDB_DB_ORPHANS, flags)
+        .add_database(LMDB_DB_ORPHAN_HEADER_ACCUMULATED_DATA, flags)
         .add_database(LMDB_DB_ORPHAN_CHAIN_TIPS, flags)
         .add_database(LMDB_DB_ORPHAN_PARENT_MAP_INDEX, flags | db::DUPSORT)
         .build()
@@ -698,6 +710,31 @@ impl BlockchainBackend for LMDBDatabase {
         })
     }
 
+    fn fetch_header_and_accumulated_data(
+        &self,
+        height: u64,
+    ) -> Result<(BlockHeader, BlockHeaderAccumulatedData), ChainStorageError>
+    {
+        let txn = ReadTransaction::new(&*self.env).map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+
+        let header: BlockHeader =
+            lmdb_get(&txn, &self.headers_db, &height)?.ok_or_else(|| ChainStorageError::ValueNotFound {
+                entity: "BlockHeader".to_string(),
+                field: "height".to_string(),
+                value: height.to_string(),
+            })?;
+
+        let accum_data = self
+            .fetch_header_accumulated_data_by_height(height, &txn)?
+            .ok_or_else(|| ChainStorageError::ValueNotFound {
+                entity: "BlockHeaderAccumulatedData".to_string(),
+                field: "height".to_string(),
+                value: height.to_string(),
+            })?;
+
+        Ok((header, accum_data))
+    }
+
     fn fetch_header_accumulated_data(
         &self,
         hash: &HashOutput,
@@ -705,39 +742,15 @@ impl BlockchainBackend for LMDBDatabase {
     {
         let txn = ReadTransaction::new(&*self.env).map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
 
-        let height: u64 = lmdb_get(&txn, &self.block_hashes_db, hash.as_slice())?.ok_or_else(|| ChainStorageError::ValueNotFound {
-            entity: "BlockHeaderAccumulatedData".to_string(),
-            field: "hash".to_string(),
-            value: hash.to_hex()
+        let height: u64 = lmdb_get(&txn, &self.block_hashes_db, hash.as_slice())?.ok_or_else(|| {
+            ChainStorageError::ValueNotFound {
+                entity: "BlockHeaderAccumulatedData".to_string(),
+                field: "hash".to_string(),
+                value: hash.to_hex(),
+            }
         })?;
-       self.fetch_header_accumulated_data_by_height(height, &txn)
+        self.fetch_header_accumulated_data_by_height(height, &txn)
     }
-
-
-
-    fn fetch_header_and_accumulated_data(
-        &self,
-        height: u64
-    ) -> Result<(BlockHeader, BlockHeaderAccumulatedData), ChainStorageError>
-    {
-        let txn = ReadTransaction::new(&*self.env).map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
-
-        let header: BlockHeader = lmdb_get(&txn, &self.headers_db, height)?.ok_or_else(|| ChainStorageError::ValueNotFound {
-            entity: "BlockHeader".to_string(),
-            field: "height".to_string(),
-            value: height.to_string()
-        })?;
-
-        let accum_data = self.fetch_header_accumulated_data_by_height(height, &txn)?.ok_or_else(|| ChainStorageError::ValueNotFound {
-            entity: "BlockHeaderAccumulatedData".to_string(),
-            field: "height".to_string(),
-            value: height.to_string()
-        })?;
-
-        Ok((header, accum_data))
-    }
-
-
 
     fn is_empty(&self) -> Result<bool, ChainStorageError> {
         let txn = ReadTransaction::new(&*self.env)?;
@@ -938,6 +951,29 @@ impl BlockchainBackend for LMDBDatabase {
         })
     }
 
+    fn fetch_tip_header(&self) -> Result<ChainHeader, ChainStorageError> {
+        let txn = ReadTransaction::new(&*self.env).map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+
+        let metadata = self.fetch_chain_metadata()?;
+        let height = metadata.height_of_longest_chain();
+        let header = lmdb_get(&txn, &self.headers_db, &height)?.ok_or_else(|| ChainStorageError::ValueNotFound {
+            entity: "Header".to_string(),
+            field: "height".to_string(),
+            value: height.to_string(),
+        })?;
+        let accumulated_data = self
+            .fetch_header_accumulated_data_by_height(metadata.height_of_longest_chain(), &txn)?
+            .ok_or_else(|| ChainStorageError::ValueNotFound {
+                entity: "BlockHeaderAccumulatedData".to_string(),
+                field: "height".to_string(),
+                value: height.to_string(),
+            })?;
+        Ok(ChainHeader {
+            header,
+            accumulated_data,
+        })
+    }
+
     /// Returns the metadata of the chain.
     fn fetch_chain_metadata(&self) -> Result<ChainMetadata, ChainStorageError> {
         // This should only be None if the database is empty
@@ -957,10 +993,10 @@ impl BlockchainBackend for LMDBDatabase {
         lmdb_len(&txn, &self.kernels_db)
     }
 
-    fn fetch_orphan_chain_tips(&self) -> Result<Vec<HashOutput>, ChainStorageError> {
+    fn fetch_orphan_chain_tips(&self) -> Result<Vec<ChainHeader>, ChainStorageError> {
         trace!(target: LOG_TARGET, "Call to fetch_orphan_chain_tips()");
         let txn = ReadTransaction::new(&*self.env).map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
-        lmdb_list_keys(&txn, &self.orphan_chain_tips_db)
+        lmdb_list_values(&txn, &self.orphan_chain_tips_db)
     }
 
     fn fetch_orphan_children_of(&self, hash: HashOutput) -> Result<Vec<HashOutput>, ChainStorageError> {
@@ -971,6 +1007,21 @@ impl BlockchainBackend for LMDBDatabase {
         );
         let txn = ReadTransaction::new(&*self.env).map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
         lmdb_get_multiple(&txn, &self.orphan_parent_map_index, hash.as_slice())
+    }
+
+    fn fetch_orphan_header_accumulated_data(
+        &self,
+        hash: HashOutput,
+    ) -> Result<BlockHeaderAccumulatedData, ChainStorageError>
+    {
+        let txn = ReadTransaction::new(&*self.env).map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+        lmdb_get(&txn, &self.orphan_header_accumulated_data_db, hash.as_slice())?.ok_or_else(|| {
+            ChainStorageError::ValueNotFound {
+                entity: "Orphan accumulated data".to_string(),
+                field: "hash".to_string(),
+                value: hash.to_hex(),
+            }
+        })
     }
 
     fn delete_oldest_orphans(
@@ -1020,7 +1071,6 @@ impl BlockchainBackend for LMDBDatabase {
         Ok(())
     }
 }
-
 
 // Fetch the chain metadata
 fn fetch_metadata(txn: &ConstTransaction<'_>, db: &Database) -> Result<ChainMetadata, ChainStorageError> {

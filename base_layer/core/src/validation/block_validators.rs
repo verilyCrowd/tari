@@ -22,8 +22,9 @@
 use crate::{
     blocks::{block_header::BlockHeader, Block, BlockValidationError},
     chain_storage,
-    chain_storage::{fetch_header, fetch_headers, BlockchainBackend, MmrTree},
+    chain_storage::{fetch_headers, BlockchainBackend, MmrTree},
     consensus::ConsensusManager,
+    proof_of_work::randomx_factory::RandomXFactory,
     transactions::{aggregated_body::AggregateBody, types::CryptoFactories},
     validation::{
         helpers,
@@ -117,11 +118,12 @@ impl Validation<Block> for StatelessBlockValidator {
 /// next block on the blockchain.
 pub struct FullConsensusValidator {
     rules: ConsensusManager,
+    randomx_factory: RandomXFactory,
 }
 
 impl FullConsensusValidator {
-    pub fn new(rules: ConsensusManager) -> Self {
-        Self { rules }
+    pub fn new(rules: ConsensusManager, randomx_factory: RandomXFactory) -> Self {
+        Self { rules, randomx_factory }
     }
 
     /// Calculates the achieved and target difficulties at the specified height and compares them.
@@ -146,9 +148,9 @@ impl FullConsensusValidator {
             // pow algo)
             // TODO: This should be removed in favour of `BlockchainDatabase::fetch_target_difficulty`
             for height in (0..height).rev() {
-                let header = fetch_header(&*db, height)?;
+                let (header, accumulated_data) = db.fetch_header_and_accumulated_data(height)?;
                 if header.pow.pow_algo == pow_algo {
-                    target_difficulties.add_front(header.timestamp(), header.target_difficulty());
+                    target_difficulties.add_front(header.timestamp(), accumulated_data.target_difficulty);
                     if target_difficulties.is_full() {
                         break;
                     }
@@ -166,7 +168,7 @@ impl FullConsensusValidator {
             target_difficulties.calculate()
         };
 
-        check_target_difficulty(block_header, target)?;
+        check_target_difficulty(block_header, target, &self.randomx_factory)?;
 
         Ok(())
     }
@@ -178,7 +180,7 @@ impl FullConsensusValidator {
         block_header: &BlockHeader,
     ) -> Result<(), ValidationError>
     {
-        if block_header.height == 0 || self.rules.get_genesis_block_hash() == block_header.hash() {
+        if block_header.height == 0 {
             return Ok(()); // Its the genesis block, so we dont have to check median
         }
 

@@ -22,54 +22,82 @@
 
 use crate::{
     blocks::BlockHeader,
-    chain_storage::{BlockchainBackend, BlockchainDatabase},
-    validation::{helpers, helpers::check_header_timestamp_greater_than_median, Validation, ValidationError},
+    chain_storage::{
+        BlockHeaderAccumulatedData,
+        BlockHeaderAccumulatedDataBuilder,
+        BlockchainBackend,
+        BlockchainDatabase,
+    },
+    proof_of_work::{Difficulty,},
+    validation::{
+        helpers,
+        helpers::check_header_timestamp_greater_than_median,
+        HeaderValidation,
+        ValidationError,
+    },
 };
 use log::*;
 use tari_crypto::tari_utilities::{hex::Hex, Hashable};
+use crate::proof_of_work::randomx_factory::RandomXFactory;
 
 const LOG_TARGET: &str = "c::bn::states::horizon_state_sync::headers";
 
 pub struct HeaderValidator<B> {
     db: BlockchainDatabase<B>,
+    randomx_factory: RandomXFactory
 }
 
 impl<B: BlockchainBackend> HeaderValidator<B> {
-    pub fn new(db: BlockchainDatabase<B>) -> Self {
-        Self { db }
+    pub fn new(db: BlockchainDatabase<B>, randomx_factory: RandomXFactory) -> Self {
+        Self { db, randomx_factory }
     }
 }
 
-impl<B: BlockchainBackend> Validation<BlockHeader> for HeaderValidator<B> {
-    fn validate(&self, header: &BlockHeader) -> Result<(), ValidationError> {
-        let header_id = format!("header #{} ({})", header.height, header.hash().to_hex());
+impl<B: BlockchainBackend> HeaderValidation for HeaderValidator<B> {
+    fn validate(
+        &self,
+        header: &BlockHeader,
+        previous_header: &BlockHeader,
+        previous_data: &BlockHeaderAccumulatedData,
+    ) -> Result<BlockHeaderAccumulatedDataBuilder, ValidationError>
+    {
+        let hash = header.hash();
+        let header_id = format!("header #{} ({})", header.height, hash.to_hex());
         self.check_median_timestamp(header)?;
         trace!(
             target: LOG_TARGET,
             "BlockHeader validation: Median timestamp is ok for {} ",
             &header_id
         );
-        self.check_achieved_and_target_difficulty(header)?;
-        trace!(
-            target: LOG_TARGET,
-            "BlockHeader validation: Achieved difficulty is ok for {} ",
-            &header_id
-        );
+        let (achieved, target) = self.check_achieved_and_target_difficulty(header)?;
+        let accum_data = BlockHeaderAccumulatedDataBuilder::default()
+            .hash(hash)
+            .target_difficulty(target)
+            .achieved_difficulty(previous_data, header.pow_algo(), achieved);
         debug!(
             target: LOG_TARGET,
             "Block header validation: BlockHeader is VALID for {}", &header_id
         );
-        Ok(())
+        Ok(accum_data)
     }
 }
 
 impl<B: BlockchainBackend> HeaderValidator<B> {
     /// Calculates the achieved and target difficulties at the specified height and compares them.
-    pub fn check_achieved_and_target_difficulty(&self, block_header: &BlockHeader) -> Result<(), ValidationError> {
+    pub fn check_achieved_and_target_difficulty(
+        &self,
+        block_header: &BlockHeader,
+    ) -> Result<(Difficulty, Difficulty), ValidationError>
+    {
         let difficulty_window = self
             .db
             .fetch_target_difficulty(block_header.pow_algo(), block_header.height)?;
-        helpers::check_target_difficulty(block_header, difficulty_window.calculate())
+
+        let target = difficulty_window.calculate();
+        Ok((
+            helpers::check_target_difficulty(block_header, target, &self.randomx_factory)?,
+            target,
+        ))
     }
 
     /// This function tests that the block timestamp is greater than the median timestamp at the specified height.

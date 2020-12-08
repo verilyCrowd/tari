@@ -21,7 +21,13 @@
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 use crate::{
     blocks::{Block, BlockHeader},
-    chain_storage::{error::ChainStorageError, InProgressHorizonSyncState},
+    chain_storage::{
+        error::ChainStorageError,
+        BlockHeaderAccumulatedData,
+        ChainBlock,
+        ChainHeader,
+        InProgressHorizonSyncState,
+    },
     transactions::{
         transaction::{TransactionInput, TransactionKernel, TransactionOutput},
         types::HashOutput,
@@ -39,8 +45,6 @@ use tari_crypto::tari_utilities::{
     hex::{to_hex, Hex},
     Hashable,
 };
-use crate::proof_of_work::Difficulty;
-use crate::chain_storage::BlockHeaderAccumulatedData;
 
 #[derive(Debug)]
 pub struct DbTransaction {
@@ -114,7 +118,12 @@ impl DbTransaction {
 
     /// Inserts a block header into the current transaction.
     pub fn insert_header(&mut self, header: BlockHeader, accum_data: BlockHeaderAccumulatedData) -> &mut Self {
-        self.operations.push(WriteOperation::InsertHeader{header: Box::new(header), accum_data: Box::new(accum_data)});
+        self.operations.push(WriteOperation::InsertHeader {
+            header: Box::new(ChainHeader {
+                header,
+                accumulated_data: accum_data,
+            }),
+        });
         self
     }
 
@@ -140,8 +149,8 @@ impl DbTransaction {
     /// Add the BlockHeader and contents of a `Block` (i.e. inputs, outputs and kernels) to the database.
     /// If the `BlockHeader` already exists, then just the contents are updated along with the relevant accumulated
     /// data.
-    pub fn insert_block(&mut self, block: Arc<Block>, header_accumulated_data: BlockHeaderAccumulatedData) -> &mut Self {
-        self.operations.push(WriteOperation::InsertBlock{block,  accum_data: Box::new(header_accumulated_data)});
+    pub fn insert_block(&mut self, block: Arc<ChainBlock>) -> &mut Self {
+        self.operations.push(WriteOperation::InsertBlock { block });
         self
     }
 
@@ -149,6 +158,11 @@ impl DbTransaction {
     /// with the calling function.
     pub fn insert_orphan(&mut self, orphan: Arc<Block>) -> &mut Self {
         self.operations.push(WriteOperation::InsertOrphanBlock(orphan));
+        self
+    }
+
+    pub fn insert_chained_orphan(&mut self, orphan: Arc<ChainBlock>) -> &mut Self {
+        self.operations.push(WriteOperation::InsertChainOrphanBlock(orphan));
         self
     }
 
@@ -178,8 +192,13 @@ impl DbTransaction {
 pub enum WriteOperation {
     SetMetadata(MetadataKey, MetadataValue),
     InsertOrphanBlock(Arc<Block>),
-    InsertHeader{ header: Box<BlockHeader>, accum_data: Box<BlockHeaderAccumulatedData>},
-    InsertBlock{block: Arc<Block>, accum_data: Box<BlockHeaderAccumulatedData>},
+    InsertChainOrphanBlock(Arc<ChainBlock>),
+    InsertHeader {
+        header: Box<ChainHeader>,
+    },
+    InsertBlock {
+        block: Arc<ChainBlock>,
+    },
     InsertInput {
         header_hash: HashOutput,
         input: Box<TransactionInput>,
@@ -212,13 +231,17 @@ impl fmt::Display for WriteOperation {
                 block.hash().to_hex(),
                 block.body.to_counts_string()
             ),
-            InsertHeader{header, achieved_difficulty}  => write!(f, "InsertHeader(#{} {} {})", header.height, header.hash().to_hex(), achieved_difficulty),
-            InsertBlock{block, achieved_difficulty} => write!(
+            InsertHeader { header } => write!(
                 f,
-                "InsertBlock({}, {} {})",
-                block.hash().to_hex(),
-                block.body.to_counts_string(),
-                achieved_difficulty
+                "InsertHeader(#{} {})",
+                header.header.height,
+                header.accumulated_data.hash.to_hex()
+            ),
+            InsertBlock { block } => write!(
+                f,
+                "InsertBlock({}, {})",
+                block.accumulated_data.hash.to_hex(),
+                block.block.body.to_counts_string(),
             ),
             InsertKernel {
                 header_hash,
@@ -257,6 +280,9 @@ impl fmt::Display for WriteOperation {
             DeleteOrphanChainTip(hash) => write!(f, "DeleteOrphanChainTip({})", hash.to_hex()),
             InsertOrphanChainTip(hash) => write!(f, "InsertOrphanChainTip({})", hash.to_hex()),
             DeleteBlock(hash) => write!(f, "DeleteBlock({})", hash.to_hex()),
+            InsertChainOrphanBlock(block) =>
+                write!(f, "InsertChainOrphanBlock({})", block.accumulated_data.hash.to_hex()),
+
         }
     }
 }
