@@ -52,7 +52,7 @@ impl From<GlobalNetwork> for Network {
             GlobalNetwork::MainNet => Network::MainNet,
             GlobalNetwork::Ridcully => Network::Ridcully,
             GlobalNetwork::LocalNet => Network::LocalNet,
-            GlobalNetwork::Rincewind => unimplemented!("Rincewind has been retired")
+            GlobalNetwork::Rincewind => unimplemented!("Rincewind has been retired"),
         }
     }
 }

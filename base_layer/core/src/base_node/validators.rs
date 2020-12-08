@@ -34,11 +34,11 @@ use crate::{
     base_node::validators::headers::HeaderValidator,
     chain_storage::{BlockchainBackend, BlockchainDatabase},
     consensus::ConsensusManager,
+    proof_of_work::randomx_factory::RandomXFactory,
     transactions::types::CryptoFactories,
     validation::{FinalHeaderStateValidation, HeaderValidation},
 };
 use std::{fmt, sync::Arc};
-use crate::proof_of_work::randomx_factory::RandomXFactory;
 
 #[derive(Clone)]
 pub struct SyncValidators {
@@ -62,7 +62,7 @@ impl SyncValidators {
         db: BlockchainDatabase<B>,
         rules: ConsensusManager,
         factories: CryptoFactories,
-        randomx_factory: RandomXFactory
+        randomx_factory: RandomXFactory,
     ) -> Self
     {
         Self::new(

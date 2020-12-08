@@ -44,7 +44,7 @@ use crate::{
         transaction::{TransactionInput, TransactionKernel, TransactionOutput},
         types::{Commitment, HashDigest, HashOutput, Signature},
     },
-    validation::{StatefulValidation, StatefulValidator, Validation, Validator},
+    validation::{HeaderValidation, StatefulValidation, StatefulValidator, Validation, Validator},
 };
 use croaring::Bitmap;
 use digest::Input;
@@ -108,13 +108,15 @@ pub struct MutableMmrState {
 /// The `ChainTipValidator` is used to check that the accounting balance and MMR states of the chain state is valid.
 pub struct Validators<B> {
     block: Arc<StatefulValidator<Block, B>>,
+    header: Arc<Box<dyn HeaderValidation>>,
     orphan: Arc<Validator<Block>>,
 }
 
 impl<B: BlockchainBackend> Validators<B> {
-    pub fn new(block: impl StatefulValidation<Block, B> + 'static, orphan: impl Validation<Block> + 'static) -> Self {
+    pub fn new(block: impl StatefulValidation<Block, B> + 'static, header: impl HeaderValidation +'static, orphan: impl Validation<Block> + 'static) -> Self {
         Self {
             block: Arc::new(Box::new(block)),
+            header: Arc::new(Box::new(header)),
             orphan: Arc::new(Box::new(orphan)),
         }
     }
@@ -124,6 +126,7 @@ impl<B> Clone for Validators<B> {
     fn clone(&self) -> Self {
         Validators {
             block: Arc::clone(&self.block),
+            header: Arc::clone(&self.header),
             orphan: Arc::clone(&self.orphan),
         }
     }
@@ -163,6 +166,11 @@ pub trait BlockchainBackend: Send + Sync {
         &self,
         hash: &HashOutput,
     ) -> Result<Option<BlockHeaderAccumulatedData>, ChainStorageError>;
+
+    fn fetch_chain_header_in_all_chains(
+        &self,
+        hash: &HashOutput
+    ) -> Result<Option<ChainHeader>, ChainStorageError>;
 
     /// Used to determine if the database is empty, i.e. a brand new database.
     /// This is called to decide if the genesis block should be created.
@@ -227,9 +235,9 @@ pub trait BlockchainBackend: Send + Sync {
     fn count_kernels(&self) -> Result<usize, ChainStorageError>;
 
     /// Fetches all of the orphans (hash) that are currently at the tip of an alternate chain
-    fn fetch_orphan_chain_tips(&self) -> Result<Vec<ChainHeader>, ChainStorageError>;
+    fn fetch_orphan_chain_tip_by_hash(&self, hash: &HashOutput) -> Result<Option<ChainHeader>, ChainStorageError>;
     /// Fetch all orphans that have `hash` as a previous hash
-    fn fetch_orphan_children_of(&self, hash: HashOutput) -> Result<Vec<HashOutput>, ChainStorageError>;
+    fn fetch_orphan_children_of(&self, hash: HashOutput) -> Result<Vec<Block>, ChainStorageError>;
 
     fn fetch_orphan_header_accumulated_data(
         &self,
@@ -831,6 +839,7 @@ where B: BlockchainBackend
         let block_add_result = add_block(
             &mut *db,
             &*self.validators.block,
+            &**self.validators.header,
             &*self.consensus_manager.chain_strength_comparer(),
             block,
         )?;
@@ -1336,6 +1345,7 @@ fn fetch_orphan<T: BlockchainBackend>(db: &T, hash: BlockHash) -> Result<Block, 
 fn add_block<T: BlockchainBackend>(
     db: &mut T,
     block_validator: &StatefulValidator<Block, T>,
+    header_validator: &dyn HeaderValidation,
     chain_strength_comparer: &dyn ChainStrengthComparer,
     block: Arc<Block>,
 ) -> Result<BlockAddResult, ChainStorageError>
@@ -1344,7 +1354,7 @@ fn add_block<T: BlockchainBackend>(
     if db.contains(&DbKey::BlockHash(block_hash))? {
         return Ok(BlockAddResult::BlockExists);
     }
-    handle_possible_reorg(db, block_validator, chain_strength_comparer, block)
+    handle_possible_reorg(db, block_validator, header_validator, chain_strength_comparer, block)
 }
 
 // Adds a new block onto the chain tip.
@@ -1641,13 +1651,14 @@ fn rewind_to_height<T: BlockchainBackend>(db: &mut T, height: u64) -> Result<Vec
 fn handle_possible_reorg<T: BlockchainBackend>(
     db: &mut T,
     block_validator: &StatefulValidator<Block, T>,
+    header_validator: &dyn HeaderValidation,
     chain_strength_comparer: &dyn ChainStrengthComparer,
     new_block: Arc<Block>,
 ) -> Result<BlockAddResult, ChainStorageError>
 {
     let db_height = db.fetch_chain_metadata()?.height_of_longest_chain();
 
-    let new_tips = insert_orphan_and_find_new_tips(db, new_block.clone())?;
+    let new_tips = insert_orphan_and_find_new_tips(db, new_block.clone(), header_validator)?;
     debug!(
         target: LOG_TARGET,
         "Added candidate block #{} ({}) to the orphan database. Best height is {}. New tips found:{} ",
@@ -1668,15 +1679,9 @@ fn handle_possible_reorg<T: BlockchainBackend>(
     }
 
     let new_block_hash = new_block.hash();
-    let orphan_chain_tips = db.fetch_orphan_chain_tips()?;
-    trace!(
-        target: LOG_TARGET,
-        "Search for orphan tips linked to block #{} complete. {} tips found",
-        new_block.header.height,
-        orphan_chain_tips.len()
-    );
+
     // Check the accumulated difficulty of the best fork chain compared to the main chain.
-    let fork_header = find_strongest_orphan_tip(db, orphan_chain_tips, chain_strength_comparer)?;
+    let fork_header = find_strongest_orphan_tip(db, new_tips, chain_strength_comparer)?;
     if fork_header.is_none() {
         // This should never happen because a block is always added to the orphan pool before
         // checking, but just in case
@@ -1880,62 +1885,117 @@ fn restore_reorged_chain<T: BlockchainBackend>(
 fn insert_orphan_and_find_new_tips<T: BlockchainBackend>(
     db: &mut T,
     block: Arc<Block>,
-) -> Result<Vec<HashOutput>, ChainStorageError>
+    validator: &dyn HeaderValidation,
+) -> Result<Vec<ChainHeader>, ChainStorageError>
 {
-    // let hash = block.hash();
-    //
-    // let mut txn = DbTransaction::new();
-    // txn.insert_orphan(block.clone());
-    //
-    // let mut new_tips_found = vec![];
-    // let tips = db.fetch_orphan_chain_tips()?;
-    unimplemented!();
-    // if tips.contains(&block.block.header.prev_hash) {
-    //     // Extend tip
-    //     txn.remove_orphan_chain_tip(block.header.prev_hash.clone());
-    //
-    //     for new_tip in find_orphan_descendant_tips_of(&*db, hash)? {
-    //         txn.insert_orphan_chain_tip(new_tip.clone());
-    //         new_tips_found.push(new_tip);
-    //     }
-    // } else {
-    //     // Find in connected
-    //     let best_chain_connection = fetch_header_by_block_hash(&*db, block.header.prev_hash.clone())?;
-    //     if let Some(connected) = best_chain_connection {
-    //         debug!(
-    //             target: LOG_TARGET,
-    //             "New orphan connects to existing chain at height: {}", connected.height
-    //         );
-    //         for new_tip in find_orphan_descendant_tips_of(&*db, hash)? {
-    //             txn.insert_orphan_chain_tip(new_tip.clone());
-    //             new_tips_found.push(new_tip);
-    //         }
-    //     } else {
-    //         debug!(
-    //             target: LOG_TARGET,
-    //             "Orphan {} was not connected to any previous headers. Inserting as true orphan",
-    //             hash.to_hex()
-    //         );
-    //     }
-    // }
-    //
-    // db.write(txn)?;
-    // Ok(new_tips_found)
+    let hash = block.hash();
+
+    let mut txn = DbTransaction::new();
+    txn.insert_orphan(block.clone());
+    let mut new_tips_found = vec![];
+    if let Some(curr_parent) = db.fetch_orphan_chain_tip_by_hash(&block.hash())?
+    {
+        let accum_builder = validator.validate(&block.header, &curr_parent.header, &curr_parent.accumulated_data)?;
+        let accumulated_data = accum_builder
+            .total_kernel_offset(
+                &curr_parent.accumulated_data.total_kernel_offset,
+                &block.header.total_kernel_offset,
+            )
+            .build()?;
+
+        // Extend tip
+        txn.remove_orphan_chain_tip(block.header.prev_hash.clone());
+
+        txn.insert_chained_orphan(
+            ChainBlock {
+                accumulated_data: accumulated_data.clone(),
+                block: block.as_ref().clone(),
+            }
+            .into(),
+        );
+
+        for new_tip in find_orphan_descendant_tips_of(&*db, &block.header, &accumulated_data, validator, &mut txn)? {
+            txn.insert_orphan_chain_tip(new_tip.accumulated_data.hash.clone());
+            new_tips_found.push(new_tip);
+        }
+    } else {
+        // Find in connected
+        let best_chain_connection = db.fetch_chain_header_in_all_chains(&block.header.prev_hash.clone())?;
+        if let Some(connected) = best_chain_connection {
+            debug!(
+                target: LOG_TARGET,
+                "New orphan connects to existing chain at height: {}", connected.header.height
+            );
+            for new_tip in find_orphan_descendant_tips_of(&*db, &connected.header, &connected.accumulated_data, validator, &mut txn)? {
+                txn.insert_orphan_chain_tip(new_tip.accumulated_data.hash.clone());
+                new_tips_found.push(new_tip);
+            }
+        } else {
+            debug!(
+                target: LOG_TARGET,
+                "Orphan {} was not connected to any previous headers. Inserting as true orphan",
+                hash.to_hex()
+            );
+        }
+    }
+
+    db.write(txn)?;
+    Ok(new_tips_found)
 }
 
 // Find the tip set of any orphans that have hash as an ancestor
 fn find_orphan_descendant_tips_of<T: BlockchainBackend>(
     db: &T,
-    hash: HashOutput,
-) -> Result<Vec<HashOutput>, ChainStorageError>
+    prev_header: &BlockHeader,
+    prev_accumulated_data: &BlockHeaderAccumulatedData,
+    validator: &dyn HeaderValidation,
+    txn: &mut DbTransaction,
+) -> Result<Vec<ChainHeader>, ChainStorageError>
 {
-    let children = db.fetch_orphan_children_of(hash.clone())?;
+    let children = db.fetch_orphan_children_of(prev_accumulated_data.hash.clone())?;
     if children.is_empty() {
-        return Ok(vec![hash]);
+        return Ok(vec![ChainHeader{
+            header: prev_header.clone(),
+            accumulated_data: prev_accumulated_data.clone()
+        }]);
     }
     let mut res = vec![];
     for child in children {
-        res.extend(find_orphan_descendant_tips_of(db, child)?);
+        match validator.validate(&child.header, &prev_header, prev_accumulated_data) {
+            Ok(builder) => {
+                let accum_data = builder
+                    .total_kernel_offset(
+                        &prev_accumulated_data.total_kernel_offset,
+                        &child.header.total_kernel_offset,
+                    )
+                    .build()?;
+                txn.insert_chained_orphan(
+                    ChainBlock {
+                        block: child.clone(),
+                        accumulated_data: accum_data.clone(),
+                    }
+                    .into(),
+                );
+                res.extend(find_orphan_descendant_tips_of(
+                    db,
+                    &child.header,
+                    &accum_data,
+                    validator,
+                    txn,
+                )?);
+            },
+            Err(e) => {
+                // Warn for now, idk might lower to debug later.
+                warn!(
+                    target: LOG_TARGET,
+                    "Discarding orphan {} because it has an invalid header: {}",
+                    child.hash().to_hex(),
+                    e
+                );
+                txn.delete_orphan(child.hash());
+            },
+        };
+
     }
     Ok(res)
 }
@@ -1954,6 +2014,7 @@ fn get_orphan_link_main_chain<T: BlockchainBackend>(
     orphan_tip: &HashOutput,
 ) -> Result<VecDeque<Arc<ChainBlock>>, ChainStorageError>
 {
+    unimplemented!("Need to review this code");
     let mut chain: VecDeque<Arc<ChainBlock>> = VecDeque::new();
     let mut curr_hash = orphan_tip.to_owned();
     loop {

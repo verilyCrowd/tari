@@ -22,7 +22,11 @@
 
 use crate::{
     blocks::BlockHeader,
-    proof_of_work::{difficulty::util::little_endian_difficulty, randomx_factory::RandomXFactory, Difficulty},
+    proof_of_work::{
+        difficulty::util::little_endian_difficulty,
+        randomx_factory::{RandomXFactory, RandomXVMInstance},
+        Difficulty,
+    },
     tari_utilities::ByteArray,
 };
 use log::*;
@@ -35,7 +39,7 @@ use monero::{
     consensus::{encode::VarInt, serialize},
     cryptonote::hash::{Hash, Hashable},
 };
-use randomx_rs::{RandomXError};
+use randomx_rs::RandomXError;
 use serde::{Deserialize, Serialize};
 use std::{
     fmt::{Display, Error, Formatter},
@@ -43,7 +47,6 @@ use std::{
 };
 use tari_crypto::tari_utilities::hex::{from_hex, Hex, HexError};
 use thiserror::Error;
-use crate::proof_of_work::randomx_factory::RandomXVMInstance;
 
 pub const LOG_TARGET: &str = "c::pow::monero_rx";
 

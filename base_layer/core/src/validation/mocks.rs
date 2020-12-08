@@ -26,6 +26,9 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
+use crate::validation::HeaderValidation;
+use crate::chain_storage::{BlockHeaderAccumulatedData, BlockHeaderAccumulatedDataBuilder};
+use crate::blocks::BlockHeader;
 
 #[derive(Clone)]
 pub struct MockValidator {
@@ -65,6 +68,12 @@ impl<T> Validation<T> for MockValidator {
                 "This mock validator always returns an error",
             ))
         }
+    }
+}
+
+impl HeaderValidation for MockValidator {
+    fn validate(&self, header: &BlockHeader, previous_header: &BlockHeader, previous_data: &BlockHeaderAccumulatedData) -> Result<BlockHeaderAccumulatedDataBuilder, ValidationError> {
+        unimplemented!()
     }
 }
 

@@ -752,6 +752,10 @@ impl BlockchainBackend for LMDBDatabase {
         self.fetch_header_accumulated_data_by_height(height, &txn)
     }
 
+    fn fetch_chain_header_in_all_chains(&self, hash: &HashOutput) -> Result<Option<ChainHeader>, ChainStorageError> {
+        unimplemented!()
+    }
+
     fn is_empty(&self) -> Result<bool, ChainStorageError> {
         let txn = ReadTransaction::new(&*self.env)?;
 
@@ -993,20 +997,51 @@ impl BlockchainBackend for LMDBDatabase {
         lmdb_len(&txn, &self.kernels_db)
     }
 
-    fn fetch_orphan_chain_tips(&self) -> Result<Vec<ChainHeader>, ChainStorageError> {
+    fn fetch_orphan_chain_tip_by_hash(&self, hash: &HashOutput) -> Result<Option<ChainHeader>, ChainStorageError> {
         trace!(target: LOG_TARGET, "Call to fetch_orphan_chain_tips()");
         let txn = ReadTransaction::new(&*self.env).map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
-        lmdb_list_values(&txn, &self.orphan_chain_tips_db)
+        if lmdb_get::<_, HashOutput>(&txn, &self.orphan_chain_tips_db, hash.as_slice())?.is_some() {
+            let orphan :
+            Block = lmdb_get(&txn, &self.orphans_db, hash.as_slice())?.ok_or_else (|| {
+                ChainStorageError::ValueNotFound {
+                    entity: "Orphan".to_string(),
+                    field: "hash".to_string(),
+                    value: hash.to_hex()
+                }
+            })?;
+                let accum_data = lmdb_get(&txn, &self.orphan_header_accumulated_data_db, hash.as_slice())?.ok_or_else(|| {
+                    ChainStorageError::ValueNotFound {
+                        entity: "Orphan accumulated data".to_string(),
+                        field: "hash".to_string(),
+                        value: hash.to_hex(),
+                    }
+                })?;
+            Ok(Some(ChainHeader {
+                header: orphan.header,
+                accumulated_data: accum_data
+            }))
+        } else{
+            Ok(None)
+        }
     }
 
-    fn fetch_orphan_children_of(&self, hash: HashOutput) -> Result<Vec<HashOutput>, ChainStorageError> {
+    fn fetch_orphan_children_of(&self, hash: HashOutput) -> Result<Vec<Block>, ChainStorageError> {
         trace!(
             target: LOG_TARGET,
             "Call to fetch_orphan_children_of({})",
             hash.to_hex()
         );
         let txn = ReadTransaction::new(&*self.env).map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
-        lmdb_get_multiple(&txn, &self.orphan_parent_map_index, hash.as_slice())
+        let orphan_hashes : Vec<HashOutput> = lmdb_get_multiple(&txn, &self.orphan_parent_map_index, hash.as_slice())?;
+        let mut res = vec![];
+        for hash in orphan_hashes {
+            res.push(lmdb_get(&txn, &self.orphans_db, hash.as_slice())?.ok_or_else(|| ChainStorageError::ValueNotFound {
+                entity: "Orphan".to_string(),
+                field: "hash".to_string(),
+                value: hash.to_hex()
+            })?)
+        }
+        Ok(res)
     }
 
     fn fetch_orphan_header_accumulated_data(

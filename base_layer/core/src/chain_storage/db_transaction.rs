@@ -88,6 +88,10 @@ impl DbTransaction {
         self
     }
 
+    pub fn delete_orphan(&mut self, hash: HashOutput) -> &mut Self {
+        self.delete(DbKey::OrphanBlock(hash))
+    }
+
     /// Delete a block header at the given height
     pub fn delete_header(&mut self, height: u64) -> &mut Self {
         self.operations.push(WriteOperation::Delete(DbKey::BlockHeader(height)));
@@ -280,9 +284,9 @@ impl fmt::Display for WriteOperation {
             DeleteOrphanChainTip(hash) => write!(f, "DeleteOrphanChainTip({})", hash.to_hex()),
             InsertOrphanChainTip(hash) => write!(f, "InsertOrphanChainTip({})", hash.to_hex()),
             DeleteBlock(hash) => write!(f, "DeleteBlock({})", hash.to_hex()),
-            InsertChainOrphanBlock(block) =>
-                write!(f, "InsertChainOrphanBlock({})", block.accumulated_data.hash.to_hex()),
-
+            InsertChainOrphanBlock(block) => {
+                write!(f, "InsertChainOrphanBlock({})", block.accumulated_data.hash.to_hex())
+            },
         }
     }
 }

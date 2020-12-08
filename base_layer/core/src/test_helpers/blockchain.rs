@@ -77,7 +77,7 @@ pub fn create_new_blockchain() -> BlockchainDatabase<TempDatabase> {
         })
         .on_ties(ChainStrengthComparerBuilder::new().by_height().build())
         .build();
-    let validators = Validators::new(MockValidator::new(true), MockValidator::new(true));
+    let validators = Validators::new(MockValidator::new(true), MockValidator::new(true), MockValidator::new(true));
     create_store_with_consensus_and_validators(&consensus_manager, validators)
 }
 
@@ -103,6 +103,7 @@ pub fn create_store_with_consensus(rules: &ConsensusManager) -> BlockchainDataba
             rules.clone(),
             RandomXFactory::new(RandomXConfig { use_large_pages: true }),
         ),
+        HeaderValdator::new()
         StatelessBlockValidator::new(rules.clone(), factories),
     );
     create_store_with_consensus_and_validators(rules, validators)
@@ -178,6 +179,10 @@ impl BlockchainBackend for TempDatabase {
     ) -> Result<Option<BlockHeaderAccumulatedData>, ChainStorageError>
     {
         self.db.fetch_header_accumulated_data(hash)
+    }
+
+    fn fetch_chain_header_in_all_chains(&self, hash: &HashOutput) -> Result<Option<ChainHeader>, ChainStorageError> {
+        unimplemented!()
     }
 
     fn is_empty(&self) -> Result<bool, ChainStorageError> {
@@ -269,11 +274,11 @@ impl BlockchainBackend for TempDatabase {
         self.db.count_kernels()
     }
 
-    fn fetch_orphan_chain_tips(&self) -> Result<Vec<ChainHeader>, ChainStorageError> {
-        self.db.fetch_orphan_chain_tips()
+    fn fetch_orphan_chain_tip_by_hash(&self, hash: &HashOutput) -> Result<Option<ChainHeader>, ChainStorageError> {
+        self.db.fetch_orphan_chain_tip_by_haash(hash)
     }
 
-    fn fetch_orphan_children_of(&self, hash: HashOutput) -> Result<Vec<HashOutput>, ChainStorageError> {
+    fn fetch_orphan_children_of(&self, hash: HashOutput) -> Result<Vec<Block>, ChainStorageError> {
         self.db.fetch_orphan_children_of(hash)
     }
 

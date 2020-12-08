@@ -22,7 +22,7 @@
 
 use crate::{
     blocks::BlockHeader,
-    proof_of_work::{sha3_difficulty, Difficulty, },
+    proof_of_work::{sha3_difficulty, Difficulty},
 };
 use log::*;
 use rand::{rngs::OsRng, RngCore};

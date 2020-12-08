@@ -42,13 +42,13 @@ use tari_core::{
         Validators,
     },
     consensus::{ConsensusManagerBuilder, Network as NetworkType},
+    proof_of_work::randomx_factory::{RandomXConfig, RandomXFactory},
     transactions::types::CryptoFactories,
     validation::{
         block_validators::{FullConsensusValidator, StatelessBlockValidator},
         mocks::MockValidator,
     },
 };
-use tari_core::proof_of_work::randomx_factory::{RandomXFactory, RandomXConfig};
 
 pub const LOG_TARGET: &str = "base_node::app";
 

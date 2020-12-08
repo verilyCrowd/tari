@@ -43,6 +43,7 @@ use tari_core::{
     consensus::ConsensusManagerBuilder,
     mempool::{service::LocalMempoolService, Mempool, MempoolConfig, MempoolValidators},
     mining::{Miner, MinerInstruction},
+    proof_of_work::randomx_factory::{RandomXConfig, RandomXFactory},
     transactions::types::CryptoFactories,
     validation::{
         block_validators::{FullConsensusValidator, StatelessBlockValidator},
@@ -64,7 +65,6 @@ use tokio::{
     task,
     time::delay_for,
 };
-use tari_core::proof_of_work::randomx_factory::{RandomXFactory, RandomXConfig};
 
 const LOG_TARGET: &str = "c::bn::initialization";
 

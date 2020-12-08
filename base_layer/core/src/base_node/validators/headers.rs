@@ -28,34 +28,28 @@ use crate::{
         BlockchainBackend,
         BlockchainDatabase,
     },
-    proof_of_work::{Difficulty,},
-    validation::{
-        helpers,
-        helpers::check_header_timestamp_greater_than_median,
-        HeaderValidation,
-        ValidationError,
-    },
+    proof_of_work::{randomx_factory::RandomXFactory, Difficulty},
+    validation::{helpers, helpers::check_header_timestamp_greater_than_median, HeaderValidation, ValidationError},
 };
 use log::*;
 use tari_crypto::tari_utilities::{hex::Hex, Hashable};
-use crate::proof_of_work::randomx_factory::RandomXFactory;
 
 const LOG_TARGET: &str = "c::bn::states::horizon_state_sync::headers";
 
-pub struct HeaderValidator<B> {
-    db: BlockchainDatabase<B>,
-    randomx_factory: RandomXFactory
+pub struct HeaderValidator {
+    randomx_factory: RandomXFactory,
 }
 
-impl<B: BlockchainBackend> HeaderValidator<B> {
-    pub fn new(db: BlockchainDatabase<B>, randomx_factory: RandomXFactory) -> Self {
-        Self { db, randomx_factory }
+impl HeaderValidator {
+    pub fn new(randomx_factory: RandomXFactory) -> Self {
+        Self {  randomx_factory }
     }
 }
 
-impl<B: BlockchainBackend> HeaderValidation for HeaderValidator<B> {
-    fn validate(
+impl HeaderValidation for HeaderValidator {
+    fn validate<B:BlockchainBackend>(
         &self,
+        db: &BlockchainDatabase<B>,
         header: &BlockHeader,
         previous_header: &BlockHeader,
         previous_data: &BlockHeaderAccumulatedData,

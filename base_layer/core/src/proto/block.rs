@@ -167,7 +167,7 @@ impl TryFrom<proto::HistoricalBlock> for HistoricalBlock {
             confirmations: historical_block.confirmations,
             block,
             // TODO: populate this
-            accumulated_data: Default::default()
+            accumulated_data: Default::default(),
         })
     }
 }
@@ -229,7 +229,7 @@ impl TryFrom<proto::NewBlockHeaderTemplate> for NewBlockHeaderTemplate {
             prev_hash: header.prev_hash,
             total_kernel_offset,
             pow,
-            target_difficulty: Default::default()
+            target_difficulty: Default::default(),
         })
     }
 }

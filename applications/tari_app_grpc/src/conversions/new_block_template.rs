@@ -41,7 +41,7 @@ impl From<NewBlockTemplate> for grpc::NewBlockTemplate {
                 accumulated_blake_difficulty: block.header.pow.accumulated_blake_difficulty.into(),
                 pow_data: block.header.pow.pow_data,
             }),
-            target_difficulty: block.header.target_difficulty.into()
+            target_difficulty: block.header.target_difficulty.into(),
         };
         Self {
             body: Some(grpc::AggregateBody {
@@ -85,7 +85,7 @@ impl TryFrom<grpc::NewBlockTemplate> for NewBlockTemplate {
             prev_hash: header.prev_hash,
             total_kernel_offset,
             pow,
-            target_difficulty: header.target_difficulty.into()
+            target_difficulty: header.target_difficulty.into(),
         };
         let body = block
             .body

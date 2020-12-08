@@ -28,7 +28,7 @@ use crate::{
         tari_amount::MicroTari,
         types::{Commitment, CryptoFactories, HashOutput, PrivateKey},
     },
-    validation::{FinalHeaderStateValidation,  ValidationError},
+    validation::{FinalHeaderStateValidation, ValidationError},
 };
 use log::*;
 use tari_crypto::{commitment::HomomorphicCommitmentFactory, tari_utilities::hash::Hashable};

@@ -1,5 +1,5 @@
 use crate::proof_of_work::monero_rx::MergeMineError;
-use randomx_rs::{RandomXCache, RandomXDataset, RandomXFlag, RandomXVM, RandomXError};
+use randomx_rs::{RandomXCache, RandomXDataset, RandomXError, RandomXFlag, RandomXVM};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, RwLock},
@@ -27,10 +27,10 @@ impl From<&RandomXConfig> for RandomXFlag {
 pub struct RandomXVMInstance {
     // Note: If the cache and dataset drops, the vm will be wonky, so have to store all
     // three for now
-    instance: Arc<Mutex<(RandomXVM, RandomXCache, RandomXDataset)>>
+    instance: Arc<Mutex<(RandomXVM, RandomXCache, RandomXDataset)>>,
 }
 
-impl RandomXVMInstance{
+impl RandomXVMInstance {
     // Note: Can maybe even get more gains by creating a new VM and sharing the dataset and cache
     pub fn new(key: &[u8]) -> Result<Self, RandomXError> {
         let flags = RandomXFlag::get_recommended_flags();
@@ -38,17 +38,15 @@ impl RandomXVMInstance{
         let dataset = RandomXDataset::new(flags, &cache, 0)?;
         let vm = RandomXVM::new(flags, Some(&cache), Some(&dataset))?;
 
-        Ok(Self{
-            instance: Arc::new(Mutex::new((vm,  cache, dataset)))
+        Ok(Self {
+            instance: Arc::new(Mutex::new((vm, cache, dataset))),
         })
-
     }
 
-    pub fn calculate_hash(&self, input: &[u8]) -> Result<Vec<u8>, RandomXError>  {
+    pub fn calculate_hash(&self, input: &[u8]) -> Result<Vec<u8>, RandomXError> {
         self.instance.lock().unwrap().0.calculate_hash(input)
     }
 }
-
 
 unsafe impl Send for RandomXVMInstance {}
 unsafe impl Sync for RandomXVMInstance {}
@@ -75,10 +73,9 @@ impl RandomXFactory {
     }
 }
 
-
 struct RandomXFactoryInner {
     config: RandomXConfig,
-    vms: HashMap<Vec<u8>, (Instant,RandomXVMInstance)>,
+    vms: HashMap<Vec<u8>, (Instant, RandomXVMInstance)>,
 }
 
 impl RandomXFactoryInner {
