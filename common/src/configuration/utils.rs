@@ -116,8 +116,6 @@ pub fn default_config(bootstrap: &ConfigBootstrap) -> Config {
     cfg.set_default("base_node.mainnet.dns_seeds_name_server", "1.1.1.1:53")
         .unwrap();
     cfg.set_default("base_node.mainnet.dns_seeds_use_dnssec", true).unwrap();
-    cfg.set_default("base_node.mainnet.block_sync_strategy", "ViaBestChainMetadata")
-        .unwrap();
     cfg.set_default(
         "base_node.mainnet.data_dir",
         default_subdir("mainnet/", Some(&bootstrap.base_path)),
@@ -159,6 +157,8 @@ pub fn default_config(bootstrap: &ConfigBootstrap) -> Config {
     )
     .unwrap();
     cfg.set_default("base_node.mainnet.grpc_enabled", false).unwrap();
+    cfg.set_default("base_node.mainnet.allow_test_addresses", false)
+        .unwrap();
     cfg.set_default("base_node.mainnet.grpc_base_node_address", "127.0.0.1:18142")
         .unwrap();
     cfg.set_default("base_node.mainnet.grpc_console_wallet_address", "127.0.0.1:18143")
@@ -178,8 +178,6 @@ pub fn default_config(bootstrap: &ConfigBootstrap) -> Config {
     cfg.set_default("base_node.ridcully.pruned_mode_cleanup_interval", 50)
         .unwrap();
     cfg.set_default("base_node.ridcully.peer_seeds", Vec::<String>::new())
-        .unwrap();
-    cfg.set_default("base_node.ridcully.block_sync_strategy", "ViaBestChainMetadata")
         .unwrap();
     cfg.set_default(
         "base_node.ridcully.data_dir",
@@ -222,6 +220,8 @@ pub fn default_config(bootstrap: &ConfigBootstrap) -> Config {
     )
     .unwrap();
 
+    cfg.set_default("base_node.ridcully.allow_test_addresses", false)
+        .unwrap();
     cfg.set_default("base_node.ridcully.grpc_enabled", false).unwrap();
     cfg.set_default("base_node.ridcully.grpc_base_node_address", "127.0.0.1:18142")
         .unwrap();
@@ -255,6 +255,8 @@ fn set_merge_mining_defaults(cfg: &mut Config) {
         .unwrap();
     cfg.set_default("merge_mining_proxy.mainnet.monerod_password", "")
         .unwrap();
+    cfg.set_default("merge_mining_proxy.mainnet.wait_for_initial_sync_at_startup", true)
+        .unwrap();
 
     cfg.set_default("merge_mining_proxy.ridcully.monerod_url", "http://18.133.55.120:38081")
         .unwrap();
@@ -265,6 +267,8 @@ fn set_merge_mining_defaults(cfg: &mut Config) {
     cfg.set_default("merge_mining_proxy.ridcully.monerod_username", "")
         .unwrap();
     cfg.set_default("merge_mining_proxy.ridcully.monerod_password", "")
+        .unwrap();
+    cfg.set_default("merge_mining_proxy.ridcully.wait_for_initial_sync_at_startup", true)
         .unwrap();
 }
 

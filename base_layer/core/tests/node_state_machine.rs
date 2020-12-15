@@ -49,7 +49,6 @@ use tari_core::{
     transactions::types::CryptoFactories,
     validation::mocks::MockValidator,
 };
-use tari_mmr::MmrCacheConfig;
 use tari_p2p::services::liveness::LivenessConfig;
 use tari_shutdown::Shutdown;
 use tempfile::tempdir;
@@ -78,7 +77,6 @@ fn test_listening_lagging() {
         &mut runtime,
         BlockchainDatabaseConfig::default(),
         BaseNodeServiceConfig::default(),
-        MmrCacheConfig::default(),
         MempoolServiceConfig::default(),
         LivenessConfig {
             auto_ping_interval: Some(Duration::from_millis(100)),
@@ -101,15 +99,12 @@ fn test_listening_lagging() {
         SyncValidators::new(MockValidator::new(true), MockValidator::new(true)),
         status_event_sender,
         state_change_event_publisher,
+        consensus_manager.clone(),
         shutdown.to_signal(),
     );
     wait_until_online(&mut runtime, &[&alice_node, &bob_node]);
 
-    let await_event_task = runtime.spawn(async move {
-        Listening { is_synced: false }
-            .next_event(&mut alice_state_machine)
-            .await
-    });
+    let await_event_task = runtime.spawn(async move { Listening::new().next_event(&mut alice_state_machine).await });
 
     runtime.block_on(async move {
         let bob_db = bob_node.blockchain_db;
@@ -162,6 +157,7 @@ fn test_event_channel() {
         SyncValidators::new(MockValidator::new(true), MockValidator::new(true)),
         status_event_sender,
         state_change_event_publisher,
+        consensus_manager.clone(),
         shutdown.to_signal(),
     );
 

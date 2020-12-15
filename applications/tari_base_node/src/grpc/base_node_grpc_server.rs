@@ -23,9 +23,10 @@ use crate::grpc::{
     blocks::{block_fees, block_heights, block_size, GET_BLOCKS_MAX_HEIGHTS, GET_BLOCKS_PAGE_SIZE},
     helpers::{mean, median},
 };
+use tari_comms::PeerManager;
 
 use log::*;
-use std::{cmp, convert::TryInto};
+use std::{cmp, convert::TryInto, sync::Arc};
 use tari_common::GlobalConfig;
 use tari_core::{
     base_node::{comms_interface::Broadcast, LocalNodeCommsInterface},
@@ -38,7 +39,11 @@ use tari_app_grpc::{
     tari_rpc,
     tari_rpc::{CalcType, Sorting},
 };
-use tari_core::base_node::StateMachineHandle;
+use tari_core::{
+    base_node::StateMachineHandle,
+    mempool::{service::LocalMempoolService, TxStorageResponse},
+    transactions::transaction::Transaction,
+};
 use tari_crypto::tari_utilities::Hashable;
 use tokio::{runtime, sync::mpsc};
 use tonic::{Request, Response, Status};
@@ -65,23 +70,29 @@ const LIST_HEADERS_DEFAULT_NUM_HEADERS: u64 = 10;
 pub struct BaseNodeGrpcServer {
     executor: runtime::Handle,
     node_service: LocalNodeCommsInterface,
+    mempool_service: LocalMempoolService,
     node_config: GlobalConfig,
     state_machine_handle: StateMachineHandle,
+    peer_manager: Arc<PeerManager>,
 }
 
 impl BaseNodeGrpcServer {
     pub fn new(
         executor: runtime::Handle,
         local_node: LocalNodeCommsInterface,
+        local_mempool: LocalMempoolService,
         node_config: GlobalConfig,
         state_machine_handle: StateMachineHandle,
+        peer_manager: Arc<PeerManager>,
     ) -> Self
     {
         Self {
             executor,
             node_service: local_node,
+            mempool_service: local_mempool,
             node_config,
             state_machine_handle,
+            peer_manager,
         }
     }
 }
@@ -99,6 +110,7 @@ impl tari_rpc::base_node_server::BaseNode for BaseNodeGrpcServer {
     type FetchMatchingUtxosStream = mpsc::Receiver<Result<tari_rpc::FetchMatchingUtxosResponse, Status>>;
     type GetBlocksStream = mpsc::Receiver<Result<tari_rpc::HistoricalBlock, Status>>;
     type GetNetworkDifficultyStream = mpsc::Receiver<Result<tari_rpc::NetworkDifficultyResponse, Status>>;
+    type GetPeersStream = mpsc::Receiver<Result<tari_rpc::GetPeersResponse, Status>>;
     type GetTokensInCirculationStream = mpsc::Receiver<Result<tari_rpc::ValueAtHeightResponse, Status>>;
     type ListHeadersStream = mpsc::Receiver<Result<tari_rpc::BlockHeader, Status>>;
     type SearchKernelsStream = mpsc::Receiver<Result<tari_rpc::HistoricalBlock, Status>>;
@@ -406,6 +418,83 @@ impl tari_rpc::base_node_server::BaseNode for BaseNodeGrpcServer {
             "Sending SubmitBlock #{} response to client", block_height
         );
         Ok(Response::new(response))
+    }
+
+    async fn submit_transaction(
+        &self,
+        request: Request<tari_rpc::SubmitTransactionRequest>,
+    ) -> Result<Response<tari_rpc::SubmitTransactionResponse>, Status>
+    {
+        let request = request.into_inner();
+        let txn: Transaction = request
+            .transaction
+            .ok_or_else(|| Status::invalid_argument("Transaction is empty"))?
+            .try_into()
+            .map_err(|e| Status::invalid_argument(format!("Failed to convert arguments. Invalid transaction.{}", e)))?;
+        debug!(
+            target: LOG_TARGET,
+            "Received SubmitTransaction request from client ({} kernels, {} outputs, {} inputs)",
+            txn.body.kernels().len(),
+            txn.body.outputs().len(),
+            txn.body.inputs().len()
+        );
+
+        let mut handler = self.mempool_service.clone();
+        let res = handler.submit_transaction(txn).await.map_err(|e| {
+            error!(target: LOG_TARGET, "Error submitting:{}", e);
+            Status::internal(e.to_string())
+        })?;
+        let response = match res {
+            TxStorageResponse::UnconfirmedPool => tari_rpc::SubmitTransactionResponse {
+                result: tari_rpc::SubmitTransactionResult::Accepted.into(),
+            },
+            TxStorageResponse::ReorgPool => tari_rpc::SubmitTransactionResponse {
+                result: tari_rpc::SubmitTransactionResult::AlreadyMined.into(),
+            },
+            TxStorageResponse::NotStored => tari_rpc::SubmitTransactionResponse {
+                result: tari_rpc::SubmitTransactionResult::Rejected.into(),
+            },
+        };
+
+        debug!(target: LOG_TARGET, "Sending SubmitTransaction response to client");
+        Ok(Response::new(response))
+    }
+
+    async fn get_peers(
+        &self,
+        _request: Request<tari_rpc::GetPeersRequest>,
+    ) -> Result<Response<Self::GetPeersStream>, Status>
+    {
+        debug!(target: LOG_TARGET, "Incoming GRPC request for get all peers");
+
+        let peers = self
+            .peer_manager
+            .all()
+            .await
+            .map_err(|e| Status::unknown(e.to_string()))?;
+        let peers: Vec<tari_rpc::Peer> = peers.into_iter().map(|p| p.into()).collect();
+        let (mut tx, rx) = mpsc::channel(peers.len());
+        self.executor.spawn(async move {
+            for peer in peers {
+                let response = tari_rpc::GetPeersResponse { peer: Some(peer) };
+                match tx.send(Ok(response)).await {
+                    Ok(_) => (),
+                    Err(err) => {
+                        warn!(target: LOG_TARGET, "Error sending peer via GRPC:  {}", err);
+                        match tx.send(Err(Status::unknown("Error sending data"))).await {
+                            Ok(_) => (),
+                            Err(send_err) => {
+                                warn!(target: LOG_TARGET, "Error sending error to GRPC client: {}", send_err)
+                            },
+                        }
+                        return;
+                    },
+                }
+            }
+        });
+
+        debug!(target: LOG_TARGET, "Sending peers response to client");
+        Ok(Response::new(rx))
     }
 
     async fn get_blocks(

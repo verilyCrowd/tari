@@ -38,18 +38,17 @@ use crate::{
     },
     common::rolling_vec::RollingVec,
     consensus::{chain_strength_comparer::ChainStrengthComparer, ConsensusManager},
-    proof_of_work::{PowAlgorithm, TargetDifficultyWindow},
+    proof_of_work::{monero_rx::MoneroData, PowAlgorithm, TargetDifficultyWindow},
     tari_utilities::epoch_time::EpochTime,
     transactions::{
         transaction::{TransactionInput, TransactionKernel, TransactionOutput},
         types::{Commitment, HashDigest, HashOutput, Signature},
     },
-    validation::{HeaderValidation, StatefulValidation, StatefulValidator, Validation, Validator},
+    validation::{HeaderValidation, StatefulValidation, StatefulValidator, Validation, ValidationError, Validator},
 };
 use croaring::Bitmap;
 use digest::Input;
 use log::*;
-use serde::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
     collections::VecDeque,
@@ -61,7 +60,7 @@ use std::{
 use strum_macros::Display;
 use tari_common_types::{chain_metadata::ChainMetadata, types::BlockHash};
 use tari_crypto::tari_utilities::{hex::Hex, Hashable};
-use tari_mmr::{Hash, MerkleMountainRange, MutableMmr, MutableMmrLeafNodes};
+use tari_mmr::{Hash, MerkleMountainRange, MutableMmr};
 use uint::static_assertions::_core::ops::RangeBounds;
 
 const LOG_TARGET: &str = "c::cs::database";
@@ -91,13 +90,6 @@ pub enum BlockAddResult {
     OrphanBlock,
     /// Indicates the new block caused a chain reorg. This contains removed blocks followed by added blocks.
     ChainReorg(Vec<Arc<Block>>, Vec<Arc<Block>>),
-}
-
-/// MutableMmrState provides the total number of leaf nodes in the base MMR and the requested leaf nodes.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct MutableMmrState {
-    pub total_leaf_count: usize,
-    pub leaf_nodes: MutableMmrLeafNodes,
 }
 
 /// A placeholder struct that contains the two validators that the database uses to decide whether or not a block is
@@ -185,6 +177,19 @@ pub trait BlockchainBackend: Send + Sync {
     /// Fetch all the kernels in a block
     fn fetch_kernels_in_block(&self, header_hash: &HashOutput) -> Result<Vec<TransactionKernel>, ChainStorageError>;
 
+    /// Fetch a kernel with this excess and returns a `TransactionKernel` and the hash of the block that it is in
+    fn fetch_kernel_by_excess(
+        &self,
+        excess: &[u8],
+    ) -> Result<Option<(TransactionKernel, HashOutput)>, ChainStorageError>;
+
+    /// Fetch a kernel with this excess signature  and returns a `TransactionKernel` and the hash of the block that it
+    /// is in
+    fn fetch_kernel_by_excess_sig(
+        &self,
+        excess_sig: &Signature,
+    ) -> Result<Option<(TransactionKernel, HashOutput)>, ChainStorageError>;
+
     /// Fetch a specific output. Returns the output and the leaf index in the output MMR
     fn fetch_output(&self, output_hash: &HashOutput) -> Result<Option<(TransactionOutput, u32)>, ChainStorageError>;
 
@@ -222,7 +227,7 @@ pub trait BlockchainBackend: Send + Sync {
     #[allow(clippy::ptr_arg)]
     fn fetch_mmr_leaf_index(&self, tree: MmrTree, hash: &Hash) -> Result<Option<u32>, ChainStorageError>;
     /// Returns the number of blocks in the block orphan pool.
-    fn get_orphan_count(&self) -> Result<usize, ChainStorageError>;
+    fn orphan_count(&self) -> Result<usize, ChainStorageError>;
     /// Returns the stored header with the highest corresponding height.
     fn fetch_last_header(&self) -> Result<BlockHeader, ChainStorageError>;
     /// Returns the stored header with the highest corresponding height.
@@ -230,9 +235,9 @@ pub trait BlockchainBackend: Send + Sync {
     /// Returns the stored chain metadata.
     fn fetch_chain_metadata(&self) -> Result<ChainMetadata, ChainStorageError>;
     /// Returns the UTXO count
-    fn count_utxos(&self) -> Result<usize, ChainStorageError>;
+    fn utxo_count(&self) -> Result<usize, ChainStorageError>;
     /// Returns the kernel count
-    fn count_kernels(&self) -> Result<usize, ChainStorageError>;
+    fn kernel_count(&self) -> Result<usize, ChainStorageError>;
 
     /// Fetches all of the orphans (hash) that are currently at the tip of an alternate chain
     fn fetch_orphan_chain_tip_by_hash(&self, hash: &HashOutput) -> Result<Option<ChainHeader>, ChainStorageError>;
@@ -250,6 +255,9 @@ pub trait BlockchainBackend: Send + Sync {
         horizon_height: u64,
         orphan_storage_capacity: usize,
     ) -> Result<(), ChainStorageError>;
+
+    /// This gets the monero seed_height. This will return 0, if the seed is unkown
+    fn fetch_monero_seed_first_seen_height(&self, seed: &str) -> Result<u64, ChainStorageError>;
 }
 
 // Private macro that pulls out all the boiler plate of extracting a DB query result from its variants
@@ -380,6 +388,17 @@ where B: BlockchainBackend
         })
     }
 
+    #[cfg(test)]
+    pub fn test_db_write_access(&self) -> Result<RwLockWriteGuard<B>, ChainStorageError> {
+        self.db.write().map_err(|e| {
+            error!(
+                target: LOG_TARGET,
+                "An attempt to get a write lock on the blockchain backend failed. {:?}", e
+            );
+            ChainStorageError::AccessError("Write lock on blockchain backend failed".into())
+        })
+    }
+
     fn db_write_access(&self) -> Result<RwLockWriteGuard<B>, ChainStorageError> {
         self.db.write().map_err(|e| {
             error!(
@@ -424,12 +443,6 @@ where B: BlockchainBackend
         set_chain_metadata(&mut *db, metadata)
     }
 
-    /// Returns the transaction kernel with the given hash.
-    pub fn fetch_kernel(&self, hash: HashOutput) -> Result<TransactionKernel, ChainStorageError> {
-        let db = self.db_read_access()?;
-        fetch_kernel(&*db, hash)
-    }
-
     // Fetch the utxo
     pub fn fetch_utxo(&self, hash: HashOutput) -> Result<Option<TransactionOutput>, ChainStorageError> {
         let db = self.db_read_access()?;
@@ -463,6 +476,24 @@ where B: BlockchainBackend
             result.push(output.map(|(out, mmr_index)| (out, data.deleted().contains(mmr_index))));
         }
         Ok(result)
+    }
+
+    pub fn fetch_kernel_by_excess(
+        &self,
+        excess: &[u8],
+    ) -> Result<Option<(TransactionKernel, HashOutput)>, ChainStorageError>
+    {
+        let db = self.db_read_access()?;
+        db.fetch_kernel_by_excess(excess)
+    }
+
+    pub fn fetch_kernel_by_excess_sig(
+        &self,
+        excess_sig: Signature,
+    ) -> Result<Option<(TransactionKernel, HashOutput)>, ChainStorageError>
+    {
+        let db = self.db_read_access()?;
+        db.fetch_kernel_by_excess_sig(&excess_sig)
     }
 
     /// Returns the block header at the given block height.
@@ -606,7 +637,7 @@ where B: BlockchainBackend
 
     /// Returns `n` hashes from height _h - offset_ where _h_ is the tip header height back to `h - n - offset`.
     pub fn fetch_block_hashes_from_header_tip(
-        self,
+        &self,
         n: usize,
         offset: usize,
     ) -> Result<Vec<HashOutput>, ChainStorageError>
@@ -615,11 +646,14 @@ where B: BlockchainBackend
             return Ok(Vec::new());
         }
 
-        // TODO: This can be substantially optimised by allowing the underlying database implementation to fetch hashes
-        //       from its indexes instead of fetching and hashing each header.
         let db = self.db_read_access()?;
         let tip_header = db.fetch_last_header()?;
-        let end_height = tip_header.height.saturating_sub(offset as u64);
+        let end_height = match tip_header.height.checked_sub(offset as u64) {
+            Some(h) => h,
+            None => {
+                return Ok(Vec::new());
+            },
+        };
         let start = end_height.saturating_sub(n as u64 - 1);
         let headers = fetch_headers(&*db, start, end_height)?;
         Ok(headers.into_iter().map(|h| h.hash()).rev().collect())
@@ -641,18 +675,9 @@ where B: BlockchainBackend
         fetch_orphan(&*db, hash)
     }
 
-    pub fn fetch_all_orphans(&self) -> Result<Vec<Block>, ChainStorageError> {
-        unimplemented!()
-        // let db = self.db_read_access()?;
-        // let mut result = vec![];
-        // // TODO: this is a bit clumsy in order to safely handle the results. There should be a cleaner way
-        // db.for_each_orphan(|o| result.push(o))?;
-        // let mut orphans = vec![];
-        // for o in result {
-        //     // check each result
-        //     orphans.push(o?.1);
-        // }
-        // Ok(orphans)
+    pub fn orphan_count(&self) -> Result<usize, ChainStorageError> {
+        let db = self.db_read_access()?;
+        db.orphan_count()
     }
 
     /// Returns the set of target difficulties for the specified proof of work algorithm. The calculated target
@@ -1272,10 +1297,6 @@ pub fn calculate_mmr_roots<T: BlockchainBackend>(db: &T, block: &Block) -> Resul
     Ok(mmr_roots)
 }
 
-fn fetch_kernel<T: BlockchainBackend>(db: &T, hash: HashOutput) -> Result<TransactionKernel, ChainStorageError> {
-    fetch!(db, hash, TransactionKernel)
-}
-
 pub fn fetch_header<T: BlockchainBackend>(db: &T, block_num: u64) -> Result<BlockHeader, ChainStorageError> {
     fetch!(db, block_num, BlockHeader)
 }
@@ -1366,6 +1387,12 @@ fn insert_block(txn: &mut DbTransaction, block: Arc<ChainBlock>) -> Result<(), C
         block.block.header.height,
         block_hash.to_hex()
     );
+    if block.header.pow.pow_algo == PowAlgorithm::Monero {
+        let monero_seed = MoneroData::from_header(&block.header)
+            .map_err(|e| ValidationError::CustomError(e.to_string()))?
+            .key;
+        txn.insert_monero_seed_height(&monero_seed, block.header.height);
+    }
 
     // Update metadata
     let accumulated_difficulty = block.accumulated_data.total_accumulated_difficulty;
@@ -2143,4 +2170,42 @@ fn convert_to_option_bounds<T: RangeBounds<u64>>(bounds: T) -> (Option<u64>, Opt
     };
 
     (start, end)
+}
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::test_helpers::blockchain::create_test_blockchain_db;
+    #[test]
+    fn lmdb_fetch_monero_seeds() {
+        // Perform test
+        {
+            let db = create_test_blockchain_db();
+            let seed = "test1".to_string();
+            {
+                let db_read = db.db_read_access().unwrap();
+                assert_eq!(db_read.fetch_monero_seed_first_seen_height(&seed).unwrap(), 0);
+            }
+            {
+                let mut txn = DbTransaction::new();
+                txn.insert_monero_seed_height(&seed, 5);
+                let mut db_write = db.test_db_write_access().unwrap();
+                assert!(db_write.write(txn).is_ok());
+            }
+            {
+                let db_read = db.db_read_access().unwrap();
+                assert_eq!(db_read.fetch_monero_seed_first_seen_height(&seed).unwrap(), 5);
+            }
+
+            {
+                let mut txn = DbTransaction::new();
+                txn.insert_monero_seed_height(&seed, 2);
+                let mut db_write = db.db_write_access().unwrap();
+                assert!(db_write.write(txn).is_ok());
+            }
+            {
+                let db_read = db.db_read_access().unwrap();
+                assert_eq!(db_read.fetch_monero_seed_first_seen_height(&seed).unwrap(), 2);
+            }
+        }
+    }
 }

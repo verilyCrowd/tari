@@ -21,7 +21,7 @@
 //  USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 use crate::{
-    base_node::{comms_interface::CommsInterfaceError, state_machine_service::states::block_sync::BlockSyncError},
+    base_node::{comms_interface::CommsInterfaceError, state_machine_service::states::helpers::BaseNodeRequestError},
     chain_storage::ChainStorageError,
     transactions::transaction::TransactionError,
 };
@@ -40,16 +40,16 @@ pub enum HorizonSyncError {
     ChainStorageError(#[from] ChainStorageError),
     #[error("Comms interface error: {0}")]
     CommsInterfaceError(#[from] CommsInterfaceError),
-    #[error("Block sync error: {0}")]
-    BlockSyncError(#[from] BlockSyncError),
     // #[error("Final state validation failed: {0}")]
     // FinalStateValidationFailed(ValidationError),
     #[error("Join error: {0}")]
     JoinError(#[from] task::JoinError),
     #[error("Invalid kernel signature: {0}")]
     InvalidKernelSignature(TransactionError),
-    /* #[error("Validation failed for {0} MMR")]
-     * InvalidMmrRoot(MmrTree), */
+    // #[error("Validation failed for {0} MMR")]
+    // InvalidMmrRoot(MmrTree),
+    #[error("Base node request error: {0}")]
+    BaseNodeRequestError(#[from] BaseNodeRequestError),
 }
 
 impl HorizonSyncError {

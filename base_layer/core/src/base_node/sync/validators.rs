@@ -1,4 +1,4 @@
-//  Copyright 2019 The Tari Project
+//  Copyright 2020, The Tari Project
 //
 //  Redistribution and use in source and binary forms, with or without modification, are permitted provided that the
 //  following conditions are met:
@@ -20,57 +20,51 @@
 //  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 //  USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use futures::channel::oneshot::Sender as OneshotSender;
-use rand::RngCore;
-use std::{collections::HashMap, sync::Arc, time::Instant};
-use tokio::sync::RwLock;
+use crate::{
+    blocks::{Block, BlockHeader},
+    chain_storage::{BlockchainBackend, BlockchainDatabase},
+    consensus::ConsensusManager,
+    transactions::types::CryptoFactories,
+    validation::{block_validators::BlockValidator, ChainBalanceValidator, Validation, Validator},
+};
+use std::{fmt, sync::Arc};
 
-pub type RequestKey = u64;
-
-/// Generate a new random request key to uniquely identify a request and its corresponding responses.
-pub fn generate_request_key<R>(rng: &mut R) -> RequestKey
-where R: RngCore {
-    rng.next_u64()
+#[derive(Clone)]
+pub struct SyncValidators {
+    pub block_body: Arc<dyn Validation<Block>>,
+    pub final_state: Arc<Validator<BlockHeader>>,
 }
 
-/// WaitingRequests is used to keep track of a set of WaitingRequests.
-#[allow(clippy::type_complexity)]
-pub struct WaitingRequests<T> {
-    requests: Arc<RwLock<HashMap<RequestKey, Option<(OneshotSender<T>, Instant)>>>>,
-}
-
-impl<T> WaitingRequests<T> {
-    /// Create a new set of waiting requests.
-    pub fn new() -> Self {
+impl SyncValidators {
+    pub fn new<TBody, TFinal>(block_body: TBody, final_state: TFinal) -> Self
+    where
+        TBody: Validation<Block> + 'static,
+        TFinal: Validation<BlockHeader> + 'static,
+    {
         Self {
-            requests: Arc::new(RwLock::new(HashMap::new())),
+            block_body: Arc::new(block_body),
+            final_state: Arc::new(Box::new(final_state)),
         }
     }
 
-    /// Insert a new waiting request.
-    pub async fn insert(&self, key: RequestKey, reply_tx: OneshotSender<T>) {
-        self.requests
-            .write()
-            .await
-            .insert(key, Some((reply_tx, Instant::now())));
-    }
-
-    /// Remove the waiting request corresponding to the provided key.
-    pub async fn remove(&self, key: RequestKey) -> Option<(OneshotSender<T>, Instant)> {
-        self.requests.write().await.remove(&key).unwrap_or(None)
-    }
-}
-
-impl<T> Clone for WaitingRequests<T> {
-    fn clone(&self) -> Self {
-        Self {
-            requests: self.requests.clone(),
-        }
+    pub fn full_consensus<B: BlockchainBackend + 'static>(
+        db: BlockchainDatabase<B>,
+        rules: ConsensusManager,
+        factories: CryptoFactories,
+    ) -> Self
+    {
+        Self::new(
+            BlockValidator::new(db.clone(), rules.clone(), factories.clone()),
+            ChainBalanceValidator::new(db, rules, factories),
+        )
     }
 }
 
-impl<T> Default for WaitingRequests<T> {
-    fn default() -> Self {
-        WaitingRequests::new()
+impl fmt::Debug for SyncValidators {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HorizonHeaderValidators")
+            .field("header", &"...")
+            .field("final_state", &"...")
+            .finish()
     }
 }

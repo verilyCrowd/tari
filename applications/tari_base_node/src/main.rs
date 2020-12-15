@@ -135,7 +135,6 @@ fn main() {
 fn main_inner() -> Result<(), ExitCodes> {
     // Parse and validate command-line arguments
     let mut bootstrap = ConfigBootstrap::from_args();
-
     // Check and initialize configuration files
     bootstrap.init_dirs(ApplicationType::BaseNode)?;
 
@@ -146,10 +145,15 @@ fn main_inner() -> Result<(), ExitCodes> {
     bootstrap.initialize_logging()?;
 
     // Populate the configuration struct
-    let node_config = GlobalConfig::convert_from(cfg).map_err(|err| {
+    let mut node_config = GlobalConfig::convert_from(cfg).map_err(|err| {
         error!(target: LOG_TARGET, "The configuration file has an error. {}", err);
         ExitCodes::ConfigError(format!("The configuration file has an error. {}", err))
     })?;
+
+    // enable-mining argument takes precedence over config setting
+    if bootstrap.enable_mining {
+        node_config.enable_mining = true;
+    }
 
     debug!(target: LOG_TARGET, "Using configuration: {:?}", node_config);
 
@@ -219,8 +223,10 @@ fn main_inner() -> Result<(), ExitCodes> {
         let grpc = crate::grpc::base_node_grpc_server::BaseNodeGrpcServer::new(
             rt.handle().clone(),
             ctx.local_node(),
+            ctx.local_mempool(),
             node_config.clone(),
             ctx.state_machine(),
+            ctx.base_node_comms().peer_manager(),
         );
 
         rt.spawn(run_grpc(grpc, node_config.grpc_base_node_address, shutdown.to_signal()));
@@ -267,7 +273,11 @@ async fn run_grpc(
     Server::builder()
         .add_service(tari_app_grpc::tari_rpc::base_node_server::BaseNodeServer::new(grpc))
         .serve_with_shutdown(grpc_address, interrupt_signal.map(|_| ()))
-        .await?;
+        .await
+        .map_err(|err| {
+            error!(target: LOG_TARGET, "GRPC encountered an  error:{}", err);
+            err
+        })?;
 
     info!(target: LOG_TARGET, "Stopping GRPC");
     Ok(())

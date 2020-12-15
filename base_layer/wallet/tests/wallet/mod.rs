@@ -139,7 +139,7 @@ async fn create_wallet(
         factories,
         Some(transaction_service_config),
         None,
-        Network::Rincewind,
+        Network::Ridcully,
         None,
         None,
         None,
@@ -303,7 +303,7 @@ async fn test_wallet() {
     let connection =
         run_migration_and_create_sqlite_connection(&current_wallet_path).expect("Could not open Sqlite db");
 
-    if let Err(WalletStorageError::InvalidEncryptionCipher) = WalletSqliteDatabase::new(connection.clone(), None) {
+    if let Err(WalletStorageError::NoPasswordError) = WalletSqliteDatabase::new(connection.clone(), None) {
         assert!(true);
     } else {
         assert!(
@@ -595,7 +595,7 @@ async fn test_import_utxo() {
         factories.clone(),
         None,
         None,
-        Network::Rincewind,
+        Network::Ridcully,
         None,
         None,
         None,
@@ -670,16 +670,7 @@ async fn test_data_generation() {
         dns_seeds_use_dnssec: false,
     };
 
-    let config = WalletConfig::new(
-        comms_config,
-        factories,
-        None,
-        None,
-        Network::Rincewind,
-        None,
-        None,
-        None,
-    );
+    let config = WalletConfig::new(comms_config, factories, None, None, Network::Ridcully, None, None, None);
 
     let transaction_backend = TransactionMemoryDatabase::new();
 

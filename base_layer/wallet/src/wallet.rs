@@ -192,7 +192,6 @@ where
                 transaction_backend,
                 node_identity.clone(),
                 factories.clone(),
-                config.network,
             ))
             .add_initializer(ContactsServiceInitializer::new(contacts_backend));
 
@@ -400,6 +399,7 @@ where
     /// Apply encryption to all the Wallet db backends. The Wallet backend will test if the db's are already encrypted
     /// in which case this will fail.
     pub async fn apply_encryption(&mut self, passphrase: String) -> Result<(), WalletError> {
+        debug!(target: LOG_TARGET, "Applying wallet encryption.");
         let passphrase_hash = Blake256::new().chain(passphrase.as_bytes()).result().to_vec();
         let key = GenericArray::from_slice(passphrase_hash.as_slice());
         let cipher = Aes256Gcm::new(key);

@@ -50,7 +50,6 @@ pub use blockchain_database::{
     BlockchainBackend,
     BlockchainDatabase,
     BlockchainDatabaseConfig,
-    MutableMmrState,
     Validators,
 };
 
@@ -77,6 +76,7 @@ pub use lmdb_db::{
     LMDB_DB_HEADERS,
     LMDB_DB_KERNELS,
     LMDB_DB_METADATA,
+    LMDB_DB_MONERO_SEED_HEIGHT,
     LMDB_DB_ORPHANS,
     LMDB_DB_UTXOS,
 };

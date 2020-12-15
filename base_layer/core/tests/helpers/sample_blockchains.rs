@@ -38,7 +38,7 @@ use tari_core::{
 use tari_storage::lmdb_store::LMDBConfig;
 // use crate::helpers::database::{TempDatabase, create_store_with_consensus};
 
-static _EMISSION: [u64; 2] = [10, 10];
+static EMISSION: [u64; 2] = [10, 10];
 
 /// Create a simple 6 block memory-backed database.
 /// Genesis block:
@@ -93,19 +93,19 @@ pub fn create_blockchain_db_no_cut_through() -> (
         txn_schema!(from: vec![outputs[1][0].clone()], to: vec![20*T, 5*T, 1*T], fee: 120*uT),
         txn_schema!(from: vec![outputs[1][1].clone()], to: vec![15*T], fee: 75*uT),
     ];
-    assert!(generate_new_block(&mut db, &mut blocks, &mut outputs, txs, &consensus_manager).is_ok());
+    generate_new_block(&mut db, &mut blocks, &mut outputs, txs, &consensus_manager).unwrap();
     // Block 3
     let txs = vec![
         txn_schema!(from: vec![outputs[2][1].clone(), outputs[2][2].clone()], to: vec![]),
         txn_schema!(from: vec![outputs[2][4].clone(), outputs[2][3].clone()], to: vec![40*T], fee: 100*uT),
     ];
-    assert!(generate_new_block(&mut db, &mut blocks, &mut outputs, txs, &consensus_manager).is_ok());
+    generate_new_block(&mut db, &mut blocks, &mut outputs, txs, &consensus_manager).unwrap();
     // Block 4
     let txs = vec![txn_schema!(
         from: vec![outputs[2][0].clone()],
         to: vec![1 * T, 2 * T, 3 * T, 4 * T]
     )];
-    assert!(generate_new_block(&mut db, &mut blocks, &mut outputs, txs, &consensus_manager).is_ok());
+    generate_new_block(&mut db, &mut blocks, &mut outputs, txs, &consensus_manager).unwrap();
     // Block 5
     let txs = vec![
         txn_schema!(
@@ -118,7 +118,7 @@ pub fn create_blockchain_db_no_cut_through() -> (
         ),
         txn_schema!(from: vec![outputs[3][2].clone()], to: vec![500_000 * uT]),
     ];
-    assert!(generate_new_block(&mut db, &mut blocks, &mut outputs, txs, &consensus_manager).is_ok());
+    generate_new_block(&mut db, &mut blocks, &mut outputs, txs, &consensus_manager).unwrap();
     (db, blocks, outputs, consensus_manager)
 }
 
@@ -133,7 +133,7 @@ pub fn create_new_blockchain(
 ) {
     let factories = CryptoFactories::default();
     let consensus_constants = ConsensusConstantsBuilder::new(network)
-        .with_emission_amounts(100_000_000.into(), &_EMISSION, 100.into())
+        .with_emission_amounts(100_000_000.into(), &EMISSION, 100.into())
         .build();
     let (block0, output) = create_genesis_block(&factories, &consensus_constants);
     let consensus_manager = ConsensusManagerBuilder::new(network)
@@ -164,7 +164,7 @@ pub fn create_new_blockchain_lmdb<P: AsRef<std::path::Path>>(
 {
     let factories = CryptoFactories::default();
     let consensus_constants = ConsensusConstantsBuilder::new(network)
-        .with_emission_amounts(100_000_000.into(), &_EMISSION, 100.into())
+        .with_emission_amounts(100_000_000.into(), &EMISSION, 100.into())
         .build();
     let (block0, output) = create_genesis_block(&factories, &consensus_constants);
     let consensus_manager = ConsensusManagerBuilder::new(network)

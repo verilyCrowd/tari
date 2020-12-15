@@ -47,10 +47,9 @@ use tari_core::{
         MempoolConfig,
         MempoolServiceConfig,
         MempoolServiceInitializer,
-        MempoolValidators,
         OutboundMempoolServiceInterface,
     },
-    test_helpers::blockchain::{create_test_db, TempDatabase},
+    test_helpers::blockchain::{create_store_with_consensus_and_validators, TempDatabase},
     validation::{
         mocks::MockValidator,
         transaction_validators::TxInputAndMaturityValidator,
@@ -58,7 +57,6 @@ use tari_core::{
         Validation,
     },
 };
-use tari_mmr::MmrCacheConfig;
 use tari_p2p::{
     comms_connector::{pubsub_connector, InboundDomainConnector, PeerMessage},
     initialization::initialize_local_test_comms,
@@ -99,7 +97,6 @@ pub struct BaseNodeBuilder {
     peers: Option<Vec<Arc<NodeIdentity>>>,
     blockchain_db_config: Option<BlockchainDatabaseConfig>,
     base_node_service_config: Option<BaseNodeServiceConfig>,
-    mmr_cache_config: Option<MmrCacheConfig>,
     mempool_config: Option<MempoolConfig>,
     mempool_service_config: Option<MempoolServiceConfig>,
     liveness_service_config: Option<LivenessConfig>,
@@ -116,7 +113,6 @@ impl BaseNodeBuilder {
             peers: None,
             blockchain_db_config: None,
             base_node_service_config: None,
-            mmr_cache_config: None,
             mempool_config: None,
             mempool_service_config: None,
             liveness_service_config: None,
@@ -147,12 +143,6 @@ impl BaseNodeBuilder {
     /// Set the configuration of the Base Node Service
     pub fn with_base_node_service_config(mut self, config: BaseNodeServiceConfig) -> Self {
         self.base_node_service_config = Some(config);
-        self
-    }
-
-    /// Set the configuration of the MerkleChangeTracker of the Base Node Backend
-    pub fn with_mmr_cache_config(mut self, config: MmrCacheConfig) -> Self {
-        self.mmr_cache_config = Some(config);
         self
     }
 
@@ -199,17 +189,11 @@ impl BaseNodeBuilder {
         let consensus_manager = self
             .consensus_manager
             .unwrap_or(ConsensusManagerBuilder::new(self.network).build());
-        let db = create_test_db();
-        let blockchain_db_config = self.blockchain_db_config.unwrap_or(BlockchainDatabaseConfig::default());
-        let blockchain_db =
-            BlockchainDatabase::new(db, &consensus_manager, validators, blockchain_db_config, false).unwrap();
-        let mempool_validator = MempoolValidators::new(
-            TxInputAndMaturityValidator::new(blockchain_db.clone()),
-            TxInputAndMaturityValidator::new(blockchain_db.clone()),
-        );
+        let blockchain_db = create_store_with_consensus_and_validators(&consensus_manager, validators);
+        let mempool_validator = TxInputAndMaturityValidator::new(blockchain_db.clone());
         let mempool = Mempool::new(
             self.mempool_config.unwrap_or(MempoolConfig::default()),
-            mempool_validator,
+            Box::new(mempool_validator),
         );
         let node_identity = self.node_identity.unwrap_or(random_node_identity());
         let node_interfaces = setup_base_node_services(
@@ -269,7 +253,6 @@ pub fn create_network_with_2_base_nodes_with_config<P: AsRef<Path>>(
     runtime: &mut Runtime,
     blockchain_db_config: BlockchainDatabaseConfig,
     base_node_service_config: BaseNodeServiceConfig,
-    mmr_cache_config: MmrCacheConfig,
     mempool_service_config: MempoolServiceConfig,
     liveness_service_config: LivenessConfig,
     consensus_manager: ConsensusManager,
@@ -283,7 +266,6 @@ pub fn create_network_with_2_base_nodes_with_config<P: AsRef<Path>>(
         .with_node_identity(alice_node_identity.clone())
         .with_blockchain_db_config(blockchain_db_config)
         .with_base_node_service_config(base_node_service_config)
-        .with_mmr_cache_config(mmr_cache_config)
         .with_mempool_service_config(mempool_service_config)
         .with_liveness_service_config(liveness_service_config.clone())
         .with_consensus_manager(consensus_manager)
@@ -293,7 +275,6 @@ pub fn create_network_with_2_base_nodes_with_config<P: AsRef<Path>>(
         .with_blockchain_db_config(blockchain_db_config)
         .with_peers(vec![alice_node_identity])
         .with_base_node_service_config(base_node_service_config)
-        .with_mmr_cache_config(mmr_cache_config)
         .with_mempool_service_config(mempool_service_config)
         .with_liveness_service_config(liveness_service_config.clone())
         .with_consensus_manager(consensus_manager)
@@ -312,12 +293,10 @@ pub fn create_network_with_3_base_nodes(
 {
     let network = Network::LocalNet;
     let consensus_manager = ConsensusManagerBuilder::new(network).build();
-    let mmr_cache_config = MmrCacheConfig { rewind_hist_len: 10 };
     create_network_with_3_base_nodes_with_config(
         runtime,
         BlockchainDatabaseConfig::default(),
         BaseNodeServiceConfig::default(),
-        mmr_cache_config,
         MempoolServiceConfig::default(),
         LivenessConfig::default(),
         consensus_manager,
@@ -330,7 +309,6 @@ pub fn create_network_with_3_base_nodes_with_config<P: AsRef<Path>>(
     runtime: &mut Runtime,
     blockchain_db_config: BlockchainDatabaseConfig,
     base_node_service_config: BaseNodeServiceConfig,
-    mmr_cache_config: MmrCacheConfig,
     mempool_service_config: MempoolServiceConfig,
     liveness_service_config: LivenessConfig,
     consensus_manager: ConsensusManager,
@@ -352,7 +330,6 @@ pub fn create_network_with_3_base_nodes_with_config<P: AsRef<Path>>(
         .with_node_identity(carol_node_identity.clone())
         .with_blockchain_db_config(blockchain_db_config)
         .with_base_node_service_config(base_node_service_config)
-        .with_mmr_cache_config(mmr_cache_config)
         .with_mempool_service_config(mempool_service_config)
         .with_liveness_service_config(liveness_service_config.clone())
         .with_consensus_manager(consensus_manager)
@@ -362,7 +339,6 @@ pub fn create_network_with_3_base_nodes_with_config<P: AsRef<Path>>(
         .with_peers(vec![carol_node_identity.clone()])
         .with_blockchain_db_config(blockchain_db_config)
         .with_base_node_service_config(base_node_service_config)
-        .with_mmr_cache_config(mmr_cache_config)
         .with_mempool_service_config(mempool_service_config)
         .with_liveness_service_config(liveness_service_config.clone())
         .with_consensus_manager(consensus_manager)
@@ -372,7 +348,6 @@ pub fn create_network_with_3_base_nodes_with_config<P: AsRef<Path>>(
         .with_peers(vec![bob_node_identity.clone(), carol_node_identity.clone()])
         .with_blockchain_db_config(blockchain_db_config)
         .with_base_node_service_config(base_node_service_config)
-        .with_mmr_cache_config(mmr_cache_config)
         .with_mempool_service_config(mempool_service_config)
         .with_liveness_service_config(liveness_service_config.clone())
         .with_consensus_manager(consensus_manager)

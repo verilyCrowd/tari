@@ -1,4 +1,4 @@
-//  Copyright 2019 The Tari Project
+//  Copyright 2020, The Tari Project
 //
 //  Redistribution and use in source and binary forms, with or without modification, are permitted provided that the
 //  following conditions are met:
@@ -20,17 +20,13 @@
 //  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 //  USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use crate::chain_storage::ChainStorageError;
-use thiserror::Error;
+#[cfg(test)]
+mod test;
 
-#[derive(Debug, Error)]
-pub enum OrphanPoolError {
-    #[error("A problem has been encountered with the storage backend: `{0}`")]
-    BackendError(String),
-    #[error("Chain storage error: `{0}`")]
-    ChainStorageError(#[from] ChainStorageError),
-    #[error("The Blockchain height is undefined")]
-    ChainHeightUndefined,
-    #[error("Cannot insert transaction with zero kernels")]
-    InsertFailedNoKernels,
-}
+mod error;
+pub use error::BlockHeaderSyncError;
+
+mod synchronizer;
+pub use synchronizer::HeaderSynchronizer;
+
+mod validator;

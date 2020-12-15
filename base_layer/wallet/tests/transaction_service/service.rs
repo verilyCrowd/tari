@@ -164,7 +164,7 @@ pub fn setup_transaction_service<T: TransactionBackend + 'static, P: AsRef<Path>
             subscription_factory.clone(),
             OutputManagerMemoryDatabase::new(),
             factories.clone(),
-            Network::Rincewind,
+            Network::Ridcully,
         ))
         .add_initializer(TransactionServiceInitializer::new(
             TransactionServiceConfig {
@@ -177,7 +177,6 @@ pub fn setup_transaction_service<T: TransactionBackend + 'static, P: AsRef<Path>
             backend,
             comms.node_identity().clone(),
             factories.clone(),
-            Network::Rincewind,
         ))
         .build();
 
@@ -257,7 +256,7 @@ pub fn setup_transaction_service_no_comms_and_oms_backend<
 
     let outbound_mock_state = mock_outbound_service.get_state();
     runtime.spawn(mock_outbound_service.run());
-    let constants = ConsensusConstantsBuilder::new(Network::Rincewind).build();
+    let constants = ConsensusConstantsBuilder::new(Network::Ridcully).build();
 
     let shutdown = Shutdown::new();
 
@@ -271,13 +270,12 @@ pub fn setup_transaction_service_no_comms_and_oms_backend<
             OutputManagerDatabase::new(oms_backend),
             oms_event_publisher.clone(),
             factories.clone(),
-            constants.coinbase_lock_height(),
+            constants,
             shutdown.to_signal(),
         ))
         .unwrap();
 
     let output_manager_service_handle = OutputManagerHandle::new(oms_request_sender, oms_event_publisher);
-    let constants = ConsensusConstantsBuilder::new(Network::Rincewind).build();
 
     let test_config = config.unwrap_or(TransactionServiceConfig {
         broadcast_monitoring_timeout: Duration::from_secs(5),
@@ -307,7 +305,6 @@ pub fn setup_transaction_service_no_comms_and_oms_backend<
             NodeIdentity::random(&mut OsRng, get_next_memory_address(), PeerFeatures::COMMUNICATION_NODE).unwrap(),
         ),
         factories.clone(),
-        constants,
         shutdown.to_signal(),
     );
     runtime.spawn(async move { output_manager_service.start().await.unwrap() });
@@ -3939,6 +3936,85 @@ fn test_handling_coinbase_transactions() {
     }
     assert_eq!(fetch_count, 2);
     assert_eq!(metadata_count, 2);
+}
+
+#[test]
+fn test_coinbase_transaction_reused_for_same_height() {
+    let factories = CryptoFactories::default();
+    let mut runtime = Runtime::new().unwrap();
+
+    let (mut tx_service, mut output_service, _, _, _, _, _, _, _, _shutdown) =
+        setup_transaction_service_no_comms(&mut runtime, factories.clone(), TransactionMemoryDatabase::new(), None);
+
+    let blockheight1 = 10;
+    let fees1 = 2000 * uT;
+    let reward1 = 1_000_000 * uT;
+
+    let blockheight2 = 11;
+    let fees2 = 3000 * uT;
+    let reward2 = 2_000_000 * uT;
+
+    // a requested coinbase transaction for the same height and amount should be the same
+    let tx1 = runtime
+        .block_on(tx_service.generate_coinbase_transaction(reward1, fees1, blockheight1))
+        .unwrap();
+
+    let tx2 = runtime
+        .block_on(tx_service.generate_coinbase_transaction(reward1, fees1, blockheight1))
+        .unwrap();
+
+    assert_eq!(tx1, tx2);
+    let transactions = runtime.block_on(tx_service.get_completed_transactions()).unwrap();
+
+    assert_eq!(transactions.len(), 1);
+    for tx in transactions.values() {
+        assert_eq!(tx.amount, fees1 + reward1);
+    }
+    assert_eq!(
+        runtime
+            .block_on(output_service.get_balance())
+            .unwrap()
+            .pending_incoming_balance,
+        fees1 + reward1
+    );
+
+    // a requested coinbase transaction for the same height but new amount should be different
+    let tx3 = runtime
+        .block_on(tx_service.generate_coinbase_transaction(reward2, fees2, blockheight1))
+        .unwrap();
+
+    assert_ne!(tx3, tx1);
+    let transactions = runtime.block_on(tx_service.get_completed_transactions()).unwrap();
+    assert_eq!(transactions.len(), 1); // tx1 and tx2 should be cancelled
+    for tx in transactions.values() {
+        assert_eq!(tx.amount, fees2 + reward2);
+    }
+    assert_eq!(
+        runtime
+            .block_on(output_service.get_balance())
+            .unwrap()
+            .pending_incoming_balance,
+        fees2 + reward2
+    );
+
+    // a requested coinbase transaction for a new height should be different
+    let tx_height2 = runtime
+        .block_on(tx_service.generate_coinbase_transaction(reward2, fees2, blockheight2))
+        .unwrap();
+
+    assert_ne!(tx1, tx_height2);
+    let transactions = runtime.block_on(tx_service.get_completed_transactions()).unwrap();
+    assert_eq!(transactions.len(), 2);
+    for tx in transactions.values() {
+        assert_eq!(tx.amount, fees2 + reward2);
+    }
+    assert_eq!(
+        runtime
+            .block_on(output_service.get_balance())
+            .unwrap()
+            .pending_incoming_balance,
+        2 * (fees2 + reward2)
+    );
 }
 
 #[test]

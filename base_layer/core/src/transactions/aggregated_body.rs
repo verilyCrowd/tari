@@ -28,7 +28,12 @@ use crate::transactions::{
 use log::*;
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Error, Formatter};
-use tari_crypto::{commitment::HomomorphicCommitmentFactory, ristretto::pedersen::PedersenCommitment};
+use tari_crypto::{
+    commitment::HomomorphicCommitmentFactory,
+    ristretto::pedersen::PedersenCommitment,
+    tari_utilities::hex::Hex,
+};
+
 pub const LOG_TARGET: &str = "c::tx::aggregated_body";
 
 /// The components of the block or transaction. The same struct can be used for either, since in Mimblewimble,
@@ -238,7 +243,7 @@ impl AggregateBody {
                 target: LOG_TARGET,
                 "{} coinbases found in body. Only a single coinbase is permitted.", coinbase_counter,
             );
-            return Err(TransactionError::InvalidCoinbaseCount);
+            return Err(TransactionError::MoreThanOneCoinbase);
         }
 
         let mut coinbase_counter = 0; // there should be exactly 1 coinbase kernel as well
@@ -253,7 +258,7 @@ impl AggregateBody {
                 target: LOG_TARGET,
                 "{} coinbase kernels found in body. Only a single coinbase kernel is permitted.", coinbase_counter,
             );
-            return Err(TransactionError::InvalidCoinbaseCount);
+            return Err(TransactionError::MoreThanOneCoinbase);
         }
         // Unwrap used here are fine as they should have an amount in them by here. If the coinbase's are missing the
         // counters should be 0 and the fn should have returned an error by now.
@@ -342,7 +347,15 @@ impl AggregateBody {
         trace!(target: LOG_TARGET, "Checking kernel total");
         let KernelSum { sum: excess, fees } = self.sum_kernels(offset_and_reward);
         let sum_io = self.sum_commitments();
+        trace!(target: LOG_TARGET, "Total outputs - inputs:{}", sum_io.to_hex());
         let fees = factory.commit_value(&PrivateKey::default(), fees.into());
+        trace!(
+            target: LOG_TARGET,
+            "Comparing sum.  excess:{} == sum {} + fees {}",
+            excess.to_hex(),
+            sum_io.to_hex(),
+            fees.to_hex()
+        );
         if excess != &sum_io + &fees {
             return Err(TransactionError::ValidationError(
                 "Sum of inputs and outputs did not equal sum of kernels with fees".into(),

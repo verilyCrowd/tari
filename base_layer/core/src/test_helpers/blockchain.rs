@@ -48,7 +48,7 @@ use crate::{
     proof_of_work::randomx_factory::{RandomXConfig, RandomXFactory},
     transactions::{
         transaction::{TransactionInput, TransactionKernel, TransactionOutput},
-        types::{CryptoFactories, HashOutput},
+        types::{CryptoFactories, HashOutput, Signature},
     },
     validation::{
         block_validators::{FullConsensusValidator, StatelessBlockValidator},
@@ -201,6 +201,22 @@ impl BlockchainBackend for TempDatabase {
         self.db.fetch_kernels_in_block(header_hash)
     }
 
+    fn fetch_kernel_by_excess(
+        &self,
+        excess: &[u8],
+    ) -> Result<Option<(TransactionKernel, HashOutput)>, ChainStorageError>
+    {
+        self.db.fetch_kernel_by_excess(excess)
+    }
+
+    fn fetch_kernel_by_excess_sig(
+        &self,
+        excess_sig: &Signature,
+    ) -> Result<Option<(TransactionKernel, HashOutput)>, ChainStorageError>
+    {
+        self.db.fetch_kernel_by_excess_sig(excess_sig)
+    }
+
     fn fetch_output(&self, output_hash: &HashOutput) -> Result<Option<(TransactionOutput, u32)>, ChainStorageError> {
         self.db.fetch_output(output_hash)
     }
@@ -250,8 +266,8 @@ impl BlockchainBackend for TempDatabase {
         self.db.fetch_mmr_leaf_index(tree, hash)
     }
 
-    fn get_orphan_count(&self) -> Result<usize, ChainStorageError> {
-        self.db.get_orphan_count()
+    fn orphan_count(&self) -> Result<usize, ChainStorageError> {
+        self.db.orphan_count()
     }
 
     fn fetch_last_header(&self) -> Result<BlockHeader, ChainStorageError> {
@@ -266,12 +282,12 @@ impl BlockchainBackend for TempDatabase {
         self.db.fetch_chain_metadata()
     }
 
-    fn count_utxos(&self) -> Result<usize, ChainStorageError> {
-        self.db.count_utxos()
+    fn utxo_count(&self) -> Result<usize, ChainStorageError> {
+        self.db.utxo_count()
     }
 
-    fn count_kernels(&self) -> Result<usize, ChainStorageError> {
-        self.db.count_kernels()
+    fn kernel_count(&self) -> Result<usize, ChainStorageError> {
+        self.db.kernel_count()
     }
 
     fn fetch_orphan_chain_tip_by_hash(&self, hash: &HashOutput) -> Result<Option<ChainHeader>, ChainStorageError> {
@@ -297,5 +313,9 @@ impl BlockchainBackend for TempDatabase {
     ) -> Result<(), ChainStorageError>
     {
         self.db.delete_oldest_orphans(horizon_height, orphan_storage_capacity)
+    }
+
+    fn fetch_monero_seed_first_seen_height(&self, seed: &str) -> Result<u64, ChainStorageError> {
+        self.db.fetch_monero_seed_first_seen_height(seed)
     }
 }

@@ -26,6 +26,7 @@ use crate::{
         Block,
         BlockValidationError,
     },
+    chain_storage::BlockchainBackend,
     consensus::{ConsensusConstants, ConsensusManager},
     proof_of_work::{
         monero_difficulty,
@@ -93,21 +94,24 @@ pub fn check_header_timestamp_greater_than_median(
 {
     if timestamps.is_empty() {
         return Err(ValidationError::BlockHeaderError(
-            BlockHeaderValidationError::InvalidTimestamp,
+            BlockHeaderValidationError::InvalidTimestamp("The timestamp is empty".to_string()),
         ));
     }
 
     let median_timestamp = calc_median_timestamp(timestamps);
-    if block_header.timestamp <= median_timestamp {
+    if block_header.timestamp < median_timestamp {
         warn!(
             target: LOG_TARGET,
-            "Block header timestamp {} is less than or equal to median timestamp: {} for block:{}",
+            "Block header timestamp {} is less than median timestamp: {} for block:{}",
             block_header.timestamp,
             median_timestamp,
             block_header.hash().to_hex()
         );
         return Err(ValidationError::BlockHeaderError(
-            BlockHeaderValidationError::InvalidTimestamp,
+            BlockHeaderValidationError::InvalidTimestamp(format!(
+                "The timestamp `{}` was less than the median timestamp `{}`",
+                block_header.timestamp, median_timestamp
+            )),
         ));
     }
 
@@ -115,14 +119,18 @@ pub fn check_header_timestamp_greater_than_median(
 }
 
 /// Check the PoW data in the BlockHeader. This currently only applies to blocks merged mined with Monero.
-pub fn check_pow_data(block_header: &BlockHeader, rules: &ConsensusManager) -> Result<(), ValidationError> {
+pub fn check_pow_data<B: BlockchainBackend>(
+    block_header: &BlockHeader,
+    rules: &ConsensusManager,
+    db: &B,
+) -> Result<(), ValidationError>
+{
     use PowAlgorithm::*;
     match block_header.pow.pow_algo {
         Monero => {
-            MoneroData::from_header(block_header).map_err(|e| ValidationError::CustomError(e.to_string()))?;
-            // TODO: We need some way of getting the seed height and or count.
-            // Current proposals are to either store the height of first seed use, or count the seed use.
-            let seed_height = 0;
+            let monero_data =
+                MoneroData::from_header(block_header).map_err(|e| ValidationError::CustomError(e.to_string()))?;
+            let seed_height = db.fetch_monero_seed_first_seen_height(&monero_data.key)?;
             if (seed_height != 0) &&
                 (block_header.height - seed_height >
                     rules.consensus_constants(block_header.height).max_randomx_seed_height())
@@ -161,6 +169,7 @@ pub fn check_target_difficulty(
             BlockHeaderValidationError::ProofOfWorkError(PowError::AchievedDifficultyTooLow { achieved, target }),
         ));
     }
+
     Ok(achieved)
 }
 
@@ -291,6 +300,42 @@ mod test {
         fn it_returns_false_when_duplicate_and_unsorted() {
             let v = [4, 2, 3, 0, 4];
             assert_eq!(is_all_unique_and_sorted(&v), false);
+        }
+    }
+
+    #[cfg(test)]
+    mod test {
+        use super::*;
+
+        mod check_median_timestamp {
+            use super::*;
+
+            #[test]
+            #[should_panic]
+            fn it_panics_if_empty() {
+                calc_median_timestamp(&[]);
+            }
+
+            #[test]
+            fn it_calculates_the_correct_median_timestamp() {
+                let median_timestamp = calc_median_timestamp(&[0.into()]);
+                assert_eq!(median_timestamp, 0.into());
+
+                let median_timestamp = calc_median_timestamp(&[123.into()]);
+                assert_eq!(median_timestamp, 123.into());
+
+                let median_timestamp = calc_median_timestamp(&[2.into(), 4.into()]);
+                assert_eq!(median_timestamp, 3.into());
+
+                let median_timestamp = calc_median_timestamp(&[0.into(), 100.into(), 0.into()]);
+                assert_eq!(median_timestamp, 100.into());
+
+                let median_timestamp = calc_median_timestamp(&[1.into(), 2.into(), 3.into(), 4.into()]);
+                assert_eq!(median_timestamp, 2.into());
+
+                let median_timestamp = calc_median_timestamp(&[1.into(), 2.into(), 3.into(), 4.into(), 5.into()]);
+                assert_eq!(median_timestamp, 3.into());
+            }
         }
     }
 }

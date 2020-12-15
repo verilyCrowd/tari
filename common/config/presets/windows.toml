@@ -77,6 +77,13 @@
 wallet_db_file = "wallet\\wallet.dat"
 console_wallet_db_file = "wallet\\console-wallet.dat"
 
+# Console wallet password
+# Should you wish to start your console wallet without typing in your password, the following options are available:
+# 1. Start the console wallet with the --password=secret argument, or
+# 2. Set the environment variable TARI_WALLET_PASSWORD=secret before starting the console wallet, or
+# 3. Set the "password" key in this [wallet] section of the config
+# password = "secret"
+
 # This is the timeout period that will be used to monitor TXO queries to the base node (default = 60). Larger values
 # are needed for wallets with many (>1000) TXOs to be validated.
 base_node_query_timeout = 120
@@ -185,11 +192,11 @@ peer_seeds = [
 # DNS seeds
 # The DNS records in these hostnames should provide TXT records as per https://github.com/tari-project/tari/pull/2319
 # Enter a domain name for the TXT records: seeds.tari.com
-dns_seeds = []
+dns_seeds =["seeds.ridcully.tari.com"]
 # The name server used to resolve DNS seeds
 # dns_seeds_name_server = "1.1.1.1:53"
 # Set to true to only accept DNS records that pass DNSSEC validation (Default: true)
-# dns_seeds_use_dnssec = true
+dns_seeds_use_dnssec = false
 
 # Determines the method of syncing blocks when the node is lagging. If you are not struggling with syncing, then
 # it is recommended to leave this setting as it. Available values are ViaBestChainMetadata and ViaRandomPeer.
@@ -363,3 +370,8 @@ monerod_username=""
 
 # Password for curl
 monerod_password=""
+
+# The merge mining proxy can either wait for the base node to achieve initial sync at startup before it enables mining,
+# or not. If merge mining starts before the base node has achieved initial sync, those Tari mined blocks will not be
+# accepted. (Default value = true; will wait for base node initial sync).
+#wait_for_initial_sync_at_startup = true
