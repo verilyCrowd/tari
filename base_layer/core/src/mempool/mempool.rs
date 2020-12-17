@@ -46,7 +46,7 @@ pub struct Mempool {
 
 impl Mempool {
     /// Create a new Mempool with an UnconfirmedPool, OrphanPool, PendingPool and ReOrgPool.
-    pub fn new(config: MempoolConfig, validator: impl MempoolTransactionValidation) -> Self {
+    pub fn new(config: MempoolConfig, validator: impl MempoolTransactionValidation + 'static) -> Self {
         Self {
             pool_storage: Arc::new(RwLock::new(MempoolStorage::new(config, validator))),
         }

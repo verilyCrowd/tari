@@ -124,3 +124,25 @@ fn verify_not_stxos<B: BlockchainBackend>(tx: &Transaction, db: &B) -> Result<()
 
     Ok(())
 }
+
+
+pub struct MempoolValidator {
+    validators: Vec<Box<dyn MempoolTransactionValidation>>
+}
+
+impl MempoolValidator {
+    pub fn new(validators: Vec<Box<dyn MempoolTransactionValidation>>) -> Self {
+        Self{
+            validators
+        }
+    }
+}
+
+impl MempoolTransactionValidation for MempoolValidator {
+    fn validate(&self, transaction: &Transaction) -> Result<(), ValidationError> {
+        for v in &self.validators {
+            v.validate(transaction)?;
+        }
+        Ok(())
+    }
+}

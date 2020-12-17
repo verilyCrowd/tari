@@ -53,7 +53,7 @@ pub struct MempoolStorage {
 
 impl MempoolStorage {
     /// Create a new Mempool with an UnconfirmedPool, OrphanPool, PendingPool and ReOrgPool.
-    pub fn new(config: MempoolConfig, validators: impl MempoolTransactionValidation) -> Self {
+    pub fn new(config: MempoolConfig, validators: impl MempoolTransactionValidation + 'static) -> Self {
         Self {
             unconfirmed_pool: UnconfirmedPool::new(config.unconfirmed_pool),
             reorg_pool: ReorgPool::new(config.reorg_pool),

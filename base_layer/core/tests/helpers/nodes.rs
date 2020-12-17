@@ -53,8 +53,6 @@ use tari_core::{
     validation::{
         mocks::MockValidator,
         transaction_validators::TxInputAndMaturityValidator,
-        StatefulValidation,
-        Validation,
     },
 };
 use tari_p2p::{

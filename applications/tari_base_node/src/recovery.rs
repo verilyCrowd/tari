@@ -45,10 +45,11 @@ use tari_core::{
     proof_of_work::randomx_factory::{RandomXConfig, RandomXFactory},
     transactions::types::CryptoFactories,
     validation::{
-        block_validators::{FullConsensusValidator, StatelessBlockValidator},
+        block_validators::{FullConsensusValidator, OrphanBlockValidator},
         mocks::MockValidator,
     },
 };
+use tari_core::validation::header_validator::HeaderValidator;
 
 pub const LOG_TARGET: &str = "base_node::app";
 
@@ -92,9 +93,11 @@ pub async fn run_recovery(node_config: &GlobalConfig) -> Result<(), anyhow::Erro
     };
     let rules = ConsensusManagerBuilder::new(node_config.network.into()).build();
     let factories = CryptoFactories::default();
+    let randomx_factory = RandomXFactory::new(RandomXConfig::default());
     let validators = Validators::new(
-        FullConsensusValidator::new(rules.clone(), RandomXFactory::new(RandomXConfig::default())),
-        StatelessBlockValidator::new(rules.clone(), factories.clone()),
+        FullConsensusValidator::new(rules.clone(), randomx_factory.clone()),
+        HeaderValidator::new(rules.clone(), randomx_factory),
+        OrphanBlockValidator::new(rules.clone(), factories.clone()),
     );
     let db_config = BlockchainDatabaseConfig {
         orphan_storage_capacity: node_config.orphan_storage_capacity,
@@ -131,7 +134,8 @@ async fn do_recovery<D: BlockchainBackend + 'static>(
 {
     // We dont care about the values, here, so we just use mock validators, and a mainnet CM.
     let rules = ConsensusManagerBuilder::new(NetworkType::LocalNet).build();
-    let validators = Validators::new(MockValidator::new(true), MockValidator::new(true));
+    let validators = Validators::new(MockValidator::new(true),
+                                     MockValidator::new(true), MockValidator::new(true));
     let temp_db_backend =
         BlockchainDatabase::new(temp_db, &rules, validators, BlockchainDatabaseConfig::default(), false)?;
     let max_height = temp_db_backend

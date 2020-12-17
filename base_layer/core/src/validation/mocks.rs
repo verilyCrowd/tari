@@ -26,7 +26,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use crate::validation::HeaderValidation;
+use crate::validation::{HeaderValidation, OrphanValidation};
 use crate::chain_storage::{BlockHeaderAccumulatedData, BlockHeaderAccumulatedDataBuilder};
 use crate::blocks::{BlockHeader, Block};
 
@@ -67,23 +67,32 @@ impl<B: BlockchainBackend> CandidateBlockValidation<B> for MockValidator {
     }
 }
 
-// impl<T> Validation<T> for MockValidator {
-//     fn validate(&self, _item: &T) -> Result<(), ValidationError> {
-//         if self.is_valid.load(Ordering::SeqCst) {
-//             Ok(())
-//         } else {
-//             Err(ValidationError::custom_error(
-//                 "This mock validator always returns an error",
-//             ))
-//         }
-//     }
-// }
+impl OrphanValidation for MockValidator {
+    fn validate(&self, _item: &Block) -> Result<(), ValidationError> {
+        if self.is_valid.load(Ordering::SeqCst) {
+            Ok(())
+        } else {
+            Err(ValidationError::custom_error(
+                "This mock validator always returns an error",
+            ))
+        }
+    }
+}
 
-// impl HeaderValidation for MockValidator {
-//     fn validate(&self, header: &BlockHeader, previous_header: &BlockHeader, previous_data: &BlockHeaderAccumulatedData) -> Result<BlockHeaderAccumulatedDataBuilder, ValidationError> {
-//         unimplemented!()
-//     }
-// }
+impl<B:BlockchainBackend> HeaderValidation<B> for MockValidator {
+    fn validate(&self, _db: &B, _header: &BlockHeader, _previous_header: &BlockHeader, _previous_data: &BlockHeaderAccumulatedData) -> Result<BlockHeaderAccumulatedDataBuilder, ValidationError> {
+        if self.is_valid.load(Ordering::SeqCst) {
+            Ok(BlockHeaderAccumulatedDataBuilder::default())
+        } else {
+            Err(ValidationError::custom_error(
+                "This mock validator always returns an error",
+            ))
+        }
+    }
+    // fn validate(&self, header: &BlockHeader, previous_header: &BlockHeader, previous_data: &BlockHeaderAccumulatedData) -> Result<BlockHeaderAccumulatedDataBuilder, ValidationError> {
+    //     unimplemented!()
+    // }
+}
 
 #[cfg(test)]
 mod test {

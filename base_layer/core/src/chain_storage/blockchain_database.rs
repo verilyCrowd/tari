@@ -582,30 +582,7 @@ where B: BlockchainBackend
     ) -> Result<TargetDifficultyWindow, ChainStorageError>
     {
         let db = self.db_read_access()?;
-
-        let mut target_difficulties = self.consensus_manager.new_target_difficulty(pow_algo, height);
-        for height in (0..height).rev() {
-            // TODO: this can be optimized by retrieving the accumulated data and header at the same time, or even
-            // better by retrieving only the epoch and target difficulty in the same lmdb transaction
-            let header = fetch_header(&*db, height)?;
-
-            if header.pow.pow_algo == pow_algo {
-                let accum_data = db.fetch_header_accumulated_data(&header.hash())?.ok_or_else(|| {
-                    ChainStorageError::ValueNotFound {
-                        entity: "BlockHeaderAccumulatedData".to_string(),
-                        field: "hash".to_string(),
-                        value: header.hash().to_hex(),
-                    }
-                })?;
-
-                target_difficulties.add_front(header.timestamp(), accum_data.target_difficulty);
-                if target_difficulties.is_full() {
-                    break;
-                }
-            }
-        }
-
-        Ok(target_difficulties)
+ fetch_target_difficulty(&*db, &self.consensus_manager, pow_algo, height)
     }
 
     pub fn fetch_target_difficulties(&self, start_hash: HashOutput) -> Result<TargetDifficulties, ChainStorageError> {
@@ -1312,6 +1289,37 @@ fn store_pruning_horizon<T: BlockchainBackend>(db: &mut T, pruning_horizon: u64)
         MetadataValue::PruningHorizon(pruning_horizon),
     );
     db.write(txn)
+}
+
+pub fn fetch_target_difficulty<T: BlockchainBackend> (
+    db: &T,
+    consensus_manager: &ConsensusManager,
+    pow_algo: PowAlgorithm,
+    height: u64,
+) -> Result<TargetDifficultyWindow, ChainStorageError> {
+    let mut target_difficulties = consensus_manager.new_target_difficulty(pow_algo, height);
+    for height in (0..height).rev() {
+        // TODO: this can be optimized by retrieving the accumulated data and header at the same time, or even
+        // better by retrieving only the epoch and target difficulty in the same lmdb transaction
+        let header = fetch_header(&*db, height)?;
+
+        if header.pow.pow_algo == pow_algo {
+            let accum_data = db.fetch_header_accumulated_data(&header.hash())?.ok_or_else(|| {
+                ChainStorageError::ValueNotFound {
+                    entity: "BlockHeaderAccumulatedData".to_string(),
+                    field: "hash".to_string(),
+                    value: header.hash().to_hex(),
+                }
+            })?;
+
+            target_difficulties.add_front(header.timestamp(), accum_data.target_difficulty);
+            if target_difficulties.is_full() {
+                break;
+            }
+        }
+    }
+
+    Ok(target_difficulties)
 }
 
 fn fetch_block<T: BlockchainBackend>(db: &T, height: u64) -> Result<HistoricalBlock, ChainStorageError> {

@@ -177,8 +177,6 @@ impl<B: BlockchainBackend + 'static> AsyncBlockchainDb<B> {
 
     make_async_fn!(insert_valid_headers(headers: Vec<(BlockHeader, BlockHeaderAccumulatedData)>) -> (), "insert_valid_headers");
 
-    make_async_fn!(fetch_target_difficulty(pow_algo: PowAlgorithm, height: u64) -> TargetDifficultyWindow, "fetch_target_difficulty");
-
     //---------------------------------- Block --------------------------------------------//
     make_async_fn!(add_block(block: Arc<Block>) -> BlockAddResult, "add_block");
 
@@ -218,6 +216,8 @@ impl<B: BlockchainBackend + 'static> AsyncBlockchainDb<B> {
     //---------------------------------- Misc. --------------------------------------------//
     make_async_fn!(fetch_block_timestamps(start_hash: HashOutput) -> RollingVec<EpochTime>, "fetch_block_timestamps");
 
+
+    make_async_fn!(fetch_target_difficulty(pow_algo: PowAlgorithm,height: u64) -> TargetDifficultyWindow, "fetch_target_difficulty");
     make_async_fn!(fetch_target_difficulties(start_hash: HashOutput) -> TargetDifficulties, "fetch_target_difficulties");
 
     make_async_fn!(fetch_block_hashes_from_header_tip(n: usize, offset: usize) -> Vec<HashOutput>, "fetch_block_hashes_from_header_tip");

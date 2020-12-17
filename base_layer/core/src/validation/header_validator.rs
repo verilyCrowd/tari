@@ -5,15 +5,27 @@ use log::*;
 use crate::chain_storage::{BlockHeaderAccumulatedData, BlockHeaderAccumulatedDataBuilder, BlockchainBackend, fetch_headers};
 use crate::proof_of_work::randomx_factory::RandomXFactory;
 use crate::proof_of_work::Difficulty;
+use crate::chain_storage::fetch_target_difficulty;
+use crate::consensus::ConsensusManager;
+use tari_crypto::tari_utilities::hash::Hashable;
+use tari_crypto::tari_utilities::hex::Hex;
 
 pub const LOG_TARGET: &str = "c::val::block_validators";
 
 pub struct HeaderValidator {
-
+    rules: ConsensusManager,
     randomx_factory: RandomXFactory
 }
 
 impl HeaderValidator {
+
+    pub fn new(rules: ConsensusManager, randomx_factory: RandomXFactory) -> Self {
+        Self {
+            rules, randomx_factory
+        }
+    }
+
+
     /// Calculates the achieved and target difficulties at the specified height and compares them.
     pub fn check_achieved_and_target_difficulty<B:BlockchainBackend>(
         &self,
@@ -22,8 +34,8 @@ impl HeaderValidator {
     ) -> Result<(Difficulty, Difficulty), ValidationError>
     {
         let difficulty_window =
-            db
-            .fetch_target_difficulty(block_header.pow_algo(), block_header.height)?;
+
+            fetch_target_difficulty(db, &self.rules,  block_header.pow_algo(), block_header.height)?;
 
         let target = difficulty_window.calculate();
         Ok((
@@ -33,9 +45,30 @@ impl HeaderValidator {
     }
 
     /// This function tests that the block timestamp is greater than the median timestamp at the specified height.
-    pub fn check_median_timestamp<B:BlockchainBackend>(&self, db: &BlockchainBackend, block_header: &BlockHeader) -> Result<(), ValidationError> {
-        let timestamps = db.fetch_block_timestamps(block_header.hash())?;
-        check_header_timestamp_greater_than_median(block_header, &timestamps)
+    fn check_median_timestamp<B: BlockchainBackend>(
+        &self,
+        db: &B,
+        block_header: &BlockHeader,
+    ) -> Result<(), ValidationError>
+    {
+        if block_header.height == 0 {
+            return Ok(()); // Its the genesis block, so we dont have to check median
+        }
+
+        let height = block_header.height - 1;
+        let min_height = height.saturating_sub(
+            self.rules
+                .consensus_constants(block_header.height)
+                .get_median_timestamp_count() as u64,
+        );
+        let timestamps = fetch_headers(db, min_height, height)?
+            .iter()
+            .map(|h| h.timestamp)
+            .collect::<Vec<_>>();
+
+        check_header_timestamp_greater_than_median(block_header, &timestamps)?;
+
+        Ok(())
     }
 }
 
