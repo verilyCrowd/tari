@@ -25,25 +25,27 @@ use crate::{
     chain_storage::{BlockchainBackend, BlockchainDatabase},
     consensus::ConsensusManager,
     transactions::types::CryptoFactories,
-    validation::{block_validators::BlockValidator, ChainBalanceValidator, Validation, Validator},
+    validation::{block_validators::BlockValidator, ChainBalanceValidator},
 };
 use std::{fmt, sync::Arc};
+use crate::chain_storage::ChainBlock;
+use crate::validation::{FinalHeaderStateValidation, CandidateBlockBodyValidation};
 
 #[derive(Clone)]
 pub struct SyncValidators {
-    pub block_body: Arc<dyn Validation<Block>>,
-    pub final_state: Arc<Validator<BlockHeader>>,
+    pub block_body: Arc<dyn CandidateBlockBodyValidation>,
+    pub final_state: Arc<dyn FinalHeaderStateValidation>,
 }
 
 impl SyncValidators {
     pub fn new<TBody, TFinal>(block_body: TBody, final_state: TFinal) -> Self
     where
-        TBody: Validation<Block> + 'static,
-        TFinal: Validation<BlockHeader> + 'static,
+        TBody: CandidateBlockBodyValidation + 'static,
+        TFinal: FinalHeaderStateValidation+ 'static,
     {
         Self {
             block_body: Arc::new(block_body),
-            final_state: Arc::new(Box::new(final_state)),
+            final_state: Arc::new(final_state),
         }
     }
 

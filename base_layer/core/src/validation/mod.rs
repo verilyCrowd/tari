@@ -27,7 +27,6 @@
 //! This module also defines a mock [MockValidator] that is useful for testing components that require validation
 //! without having to bring in all sorts of blockchain and communications paraphernalia.
 
-mod and_then;
 
 mod error;
 pub use error::ValidationError;
@@ -38,14 +37,19 @@ mod traits;
 pub use traits::{
     FinalHeaderStateValidation,
     HeaderValidation,
-    StatefulValidation,
-    StatefulValidator,
-    Validation,
-    ValidationExt,
-    Validator,
+    // StatefulValidation,
+    // StatefulValidator,
+    // Validation,
+    // Validator,
+    OrphanValidation,
+    MempoolTransactionValidation,
+    CandidateBlockValidation,
+    CandidateBlockBodyValidation
+
 };
 
 pub mod block_validators;
+pub mod header_validator;
 pub mod mocks;
 pub mod transaction_validators;
 // pub mod header_validator;

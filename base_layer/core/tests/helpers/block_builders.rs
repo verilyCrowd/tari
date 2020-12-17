@@ -79,10 +79,11 @@ fn _genesis_template(
     consensus_constants: &ConsensusConstants,
 ) -> (NewBlockTemplate, UnblindedOutput)
 {
-    let header = BlockHeader::new(consensus_constants.blockchain_version());
-    let (utxo, kernel, output) = create_coinbase(factories, coinbase_value, consensus_constants.coinbase_lock_height());
-    let block = NewBlockTemplate::from(header.into_builder().with_coinbase_utxo(utxo, kernel).build());
-    (block, output)
+    unimplemented!()
+    // let header = BlockHeader::new(consensus_constants.blockchain_version());
+    // let (utxo, kernel, output) = create_coinbase(factories, coinbase_value, consensus_constants.coinbase_lock_height());
+    // let block = NewBlockTemplate::from(header.into_builder().with_coinbase_utxo(utxo, kernel).build());
+    // (block, output)
 }
 
 // This is a helper function to generate and print out a block that can be used as the genesis block.
@@ -191,9 +192,10 @@ pub fn chain_block(
     consensus: &ConsensusManager,
 ) -> NewBlockTemplate
 {
-    let mut header = BlockHeader::from_previous(&prev_block.header).unwrap();
-    header.version = consensus.consensus_constants(header.height).blockchain_version();
-    NewBlockTemplate::from(header.into_builder().with_transactions(transactions).build())
+    unimplemented!()
+    // let mut header = BlockHeader::from_previous(&prev_block.header).unwrap();
+    // header.version = consensus.consensus_constants(header.height).blockchain_version();
+    // NewBlockTemplate::from(header.into_builder().with_transactions(transactions).build())
 }
 
 /// Create a new block using the provided coinbase and transactions that adds to the blockchain given in `prev_block`.
@@ -205,15 +207,16 @@ pub fn chain_block_with_coinbase(
     consensus: &ConsensusManager,
 ) -> NewBlockTemplate
 {
-    let mut header = BlockHeader::from_previous(&prev_block.header).unwrap();
-    header.version = consensus.consensus_constants(header.height).blockchain_version();
-    NewBlockTemplate::from(
-        header
-            .into_builder()
-            .with_transactions(transactions)
-            .with_coinbase_utxo(coinbase_utxo, coinbase_kernel)
-            .build(),
-    )
+    unimplemented!()
+    // let mut header = BlockHeader::from_previous(&prev_block.header).unwrap();
+    // header.version = consensus.consensus_constants(header.height).blockchain_version();
+    // NewBlockTemplate::from(
+    //     header
+    //         .into_builder()
+    //         .with_transactions(transactions)
+    //         .with_coinbase_utxo(coinbase_utxo, coinbase_kernel)
+    //         .build(),
+    // )
 }
 
 /// Create a new block using the provided coinbase and transactions that adds to the blockchain given in `prev_block`.
@@ -224,28 +227,29 @@ pub fn chain_block_with_new_coinbase(
     factories: &CryptoFactories,
 ) -> (NewBlockTemplate, UnblindedOutput)
 {
-    let height = prev_block.header.height + 1;
-    let mut coinbase_value = consensus_manager.emission_schedule().block_reward(height);
-    coinbase_value += transactions
-        .iter()
-        .fold(MicroTari(0), |acc, x| acc + x.body.get_total_fee());
-    let (coinbase_utxo, coinbase_kernel, coinbase_output) = create_coinbase(
-        &factories,
-        coinbase_value,
-        height + consensus_manager.consensus_constants(0).coinbase_lock_height(),
-    );
-    let mut header = BlockHeader::from_previous(&prev_block.header).unwrap();
-    header.version = consensus_manager
-        .consensus_constants(header.height)
-        .blockchain_version();
-    let template = NewBlockTemplate::from(
-        header
-            .into_builder()
-            .with_transactions(transactions)
-            .with_coinbase_utxo(coinbase_utxo, coinbase_kernel)
-            .build(),
-    );
-    (template, coinbase_output)
+    // let height = prev_block.header.height + 1;
+    // let mut coinbase_value = consensus_manager.emission_schedule().block_reward(height);
+    // coinbase_value += transactions
+    //     .iter()
+    //     .fold(MicroTari(0), |acc, x| acc + x.body.get_total_fee());
+    // let (coinbase_utxo, coinbase_kernel, coinbase_output) = create_coinbase(
+    //     &factories,
+    //     coinbase_value,
+    //     height + consensus_manager.consensus_constants(0).coinbase_lock_height(),
+    // );
+    // let mut header = BlockHeader::from_previous(&prev_block.header).unwrap();
+    // header.version = consensus_manager
+    //     .consensus_constants(header.height)
+    //     .blockchain_version();
+    // let template = NewBlockTemplate::from(
+    //     header
+    //         .into_builder()
+    //         .with_transactions(transactions)
+    //         .with_coinbase_utxo(coinbase_utxo, coinbase_kernel)
+    //         .build(),
+    // );
+    // (template, coinbase_output)
+    unimplemented!()
 }
 
 /// Create a new block with the provided transactions. The new MMR roots are calculated, and then the new block is

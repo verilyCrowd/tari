@@ -23,7 +23,7 @@ use crate::{
     blocks::{block_header::BlockHeader, Block},
     chain_storage::{
         accumulated_data::{BlockAccumulatedData, BlockHeaderAccumulatedData},
-        blockchain_database::BlockchainBackend,
+        BlockchainBackend,
         db_transaction::{DbKey, DbTransaction, DbValue, MetadataValue, MmrTree, WriteOperation},
         error::ChainStorageError,
         lmdb_db::{

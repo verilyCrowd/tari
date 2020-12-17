@@ -52,6 +52,7 @@ unsafe impl Send for RandomXVMInstance {}
 unsafe impl Sync for RandomXVMInstance {}
 
 // Thread safe impl of the inner impl
+#[derive(Clone)]
 pub struct RandomXFactory {
     inner: Arc<RwLock<RandomXFactoryInner>>,
 }

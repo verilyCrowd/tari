@@ -51,7 +51,7 @@ use crate::{
         types::{CryptoFactories, HashOutput, Signature},
     },
     validation::{
-        block_validators::{FullConsensusValidator, StatelessBlockValidator},
+        block_validators::{FullConsensusValidator, },
         mocks::MockValidator,
     },
 };
@@ -66,19 +66,20 @@ use tari_test_utils::paths::create_temporary_data_path;
 
 /// Create a new blockchain database containing no blocks.
 pub fn create_new_blockchain() -> BlockchainDatabase<TempDatabase> {
-    let network = Network::LocalNet;
-    let consensus_constants = ConsensusConstantsBuilder::new(network).build();
-    let genesis = genesis_template();
-    let consensus_manager = ConsensusManagerBuilder::new(network)
-        .with_consensus_constants(consensus_constants)
-        .with_block(Block {
-            header: genesis.header.into(),
-            body: genesis.body,
-        })
-        .on_ties(ChainStrengthComparerBuilder::new().by_height().build())
-        .build();
-    let validators = Validators::new(MockValidator::new(true), MockValidator::new(true), MockValidator::new(true));
-    create_store_with_consensus_and_validators(&consensus_manager, validators)
+    unimplemented!()
+    // let network = Network::LocalNet;
+    // let consensus_constants = ConsensusConstantsBuilder::new(network).build();
+    // let genesis = genesis_template();
+    // let consensus_manager = ConsensusManagerBuilder::new(network)
+    //     .with_consensus_constants(consensus_constants)
+    //     .with_block(Block {
+    //         header: genesis.header.into(),
+    //         body: genesis.body,
+    //     })
+    //     .on_ties(ChainStrengthComparerBuilder::new().by_height().build())
+    //     .build();
+    // let validators = Validators::new(MockValidator::new(true), MockValidator::new(true), MockValidator::new(true));
+    // create_store_with_consensus_and_validators(&consensus_manager, validators)
 }
 
 fn genesis_template() -> NewBlockTemplate {
@@ -97,16 +98,17 @@ pub fn create_store_with_consensus_and_validators(
 }
 
 pub fn create_store_with_consensus(rules: &ConsensusManager) -> BlockchainDatabase<TempDatabase> {
-    let factories = CryptoFactories::default();
-    let validators = Validators::new(
-        FullConsensusValidator::new(
-            rules.clone(),
-            RandomXFactory::new(RandomXConfig { use_large_pages: true }),
-        ),
-        HeaderValdator::new()
-        StatelessBlockValidator::new(rules.clone(), factories),
-    );
-    create_store_with_consensus_and_validators(rules, validators)
+    unimplemented!()
+    // let factories = CryptoFactories::default();
+    // let validators = Validators::new(
+    //     FullConsensusValidator::new(
+    //         rules.clone(),
+    //         RandomXFactory::new(RandomXConfig { use_large_pages: true }),
+    //     ),
+    //     HeaderValidator::new(),
+    //     StatelessBlockValidator::new(rules.clone(), factories),
+    // );
+    // create_store_with_consensus_and_validators(rules, validators)
 }
 pub fn create_test_blockchain_db() -> BlockchainDatabase<TempDatabase> {
     let network = Network::Ridcully;
@@ -291,7 +293,7 @@ impl BlockchainBackend for TempDatabase {
     }
 
     fn fetch_orphan_chain_tip_by_hash(&self, hash: &HashOutput) -> Result<Option<ChainHeader>, ChainStorageError> {
-        self.db.fetch_orphan_chain_tip_by_haash(hash)
+        self.db.fetch_orphan_chain_tip_by_hash(hash)
     }
 
     fn fetch_orphan_children_of(&self, hash: HashOutput) -> Result<Vec<Block>, ChainStorageError> {

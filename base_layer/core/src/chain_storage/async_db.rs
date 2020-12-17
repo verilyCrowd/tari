@@ -28,6 +28,7 @@ use crate::{
         BlockchainBackend,
         BlockchainDatabase,
         ChainBlock,
+        ChainHeader,
         ChainStorageError,
         DbTransaction,
         HistoricalBlock,
@@ -156,6 +157,7 @@ impl<B: BlockchainBackend + 'static> AsyncBlockchainDb<B> {
 
     //---------------------------------- Headers --------------------------------------------//
     make_async_fn!(fetch_header(height: u64) -> Option<BlockHeader>, "fetch_header");
+    make_async_fn!(fetch_header_and_accumulated_data(height: u64) -> (BlockHeader, BlockHeaderAccumulatedData), "fetch_header_and_accumulated_data");
 
     make_async_fn!(fetch_header_accumulated_data(hash: HashOutput) -> Option<BlockHeaderAccumulatedData>, "fetch_header_accumulated_data");
 
@@ -163,13 +165,15 @@ impl<B: BlockchainBackend + 'static> AsyncBlockchainDb<B> {
 
     make_async_fn!(fetch_header_by_block_hash(hash: HashOutput) -> Option<BlockHeader>, "fetch_header_by_block_hash");
 
+    make_async_fn!(fetch_chain_header_by_block_hash(hash: HashOutput) -> Option<ChainHeader>, "fetch_chain_header_by_block_hash");
+
     make_async_fn!(
          /// Find the first matching header in a list of block hashes, returning the index of the match and the BlockHeader. Or None if not found.
         find_headers_after_hash<I: IntoIterator<Item = HashOutput>>(ordered_hashes: I, count: u64) -> Option<(usize, Vec<BlockHeader>)>,
         "find_headers_after_hash"
     );
 
-    make_async_fn!(fetch_tip_header() -> BlockHeader, "fetch_header");
+    make_async_fn!(fetch_tip_header() -> ChainHeader, "fetch_tip_header");
 
     make_async_fn!(insert_valid_headers(headers: Vec<(BlockHeader, BlockHeaderAccumulatedData)>) -> (), "insert_valid_headers");
 

@@ -31,9 +31,10 @@ use crate::{
         TxStorageResponse,
     },
     transactions::{transaction::Transaction, types::Signature},
-    validation::Validator,
 };
 use std::sync::{Arc, RwLock};
+use crate::chain_storage::ChainBlock;
+use crate::validation::MempoolTransactionValidation;
 
 /// The Mempool consists of an Unconfirmed Transaction Pool, Pending Pool, Orphan Pool and Reorg Pool and is responsible
 /// for managing and maintaining all unconfirmed transactions have not yet been included in a block, and transactions
@@ -45,7 +46,7 @@ pub struct Mempool {
 
 impl Mempool {
     /// Create a new Mempool with an UnconfirmedPool, OrphanPool, PendingPool and ReOrgPool.
-    pub fn new(config: MempoolConfig, validator: Validator<Transaction>) -> Self {
+    pub fn new(config: MempoolConfig, validator: impl MempoolTransactionValidation) -> Self {
         Self {
             pool_storage: Arc::new(RwLock::new(MempoolStorage::new(config, validator))),
         }

@@ -28,7 +28,6 @@ use crate::{
     proto::base_node::SyncBlocksRequest,
     tari_utilities::{hex::Hex, Hashable},
     transactions::aggregated_body::AggregateBody,
-    validation::Validation,
 };
 use futures::StreamExt;
 use log::*;
@@ -43,6 +42,8 @@ use tari_comms::{
     PeerConnection,
 };
 use tokio::task;
+use crate::chain_storage::ChainBlock;
+use crate::validation::{CandidateBlockValidation, CandidateBlockBodyValidation};
 
 const LOG_TARGET: &str = "c::bn::block_sync";
 
@@ -50,7 +51,7 @@ pub struct BlockSynchronizer<B> {
     db: AsyncBlockchainDb<B>,
     connectivity: ConnectivityRequester,
     sync_peer: Option<PeerConnection>,
-    block_validator: Arc<dyn Validation<Block>>,
+    block_validator: Arc<dyn CandidateBlockBodyValidation>,
     hooks: Hooks,
 }
 
@@ -59,7 +60,7 @@ impl<B: BlockchainBackend + 'static> BlockSynchronizer<B> {
         db: AsyncBlockchainDb<B>,
         connectivity: ConnectivityRequester,
         sync_peer: Option<PeerConnection>,
-        block_validator: Arc<dyn Validation<Block>>,
+        block_validator: Arc<dyn CandidateBlockBodyValidation>,
     ) -> Self
     {
         Self {
@@ -72,12 +73,12 @@ impl<B: BlockchainBackend + 'static> BlockSynchronizer<B> {
     }
 
     pub fn on_progress<H>(&mut self, hook: H)
-    where H: FnMut(Arc<Block>, u64, &[NodeId]) + Send + Sync + 'static {
+    where H: FnMut(Arc<ChainBlock>, u64, &[NodeId]) + Send + Sync + 'static {
         self.hooks.add_on_progress_block_hook(hook);
     }
 
     pub fn on_complete<H>(&mut self, hook: H)
-    where H: FnMut(Arc<Block>) + Send + Sync + 'static {
+    where H: FnMut(Arc<ChainBlock>) + Send + Sync + 'static {
         self.hooks.add_on_complete_hook(hook);
     }
 
@@ -125,23 +126,23 @@ impl<B: BlockchainBackend + 'static> BlockSynchronizer<B> {
     {
         let tip_header = self.db.fetch_tip_header().await?;
         let local_metadata = self.db.get_chain_metadata().await?;
-        if tip_header.height <= local_metadata.height_of_longest_chain() {
+        if tip_header.height() <= local_metadata.height_of_longest_chain() {
             debug!(
                 target: LOG_TARGET,
-                "Blocks already synchronized to height {}.", tip_header.height
+                "Blocks already synchronized to height {}.", tip_header.height()
             );
             return Ok(());
         }
 
         let tip_hash = tip_header.hash();
-        let tip_height = tip_header.height;
+        let tip_height = tip_header.height();
         let best_height = local_metadata.height_of_longest_chain();
-        let best_block = self
+        let (best_block, accumulated_data) = self
             .db
-            .fetch_header(best_height)
-            .await?
-            .ok_or_else(|| BlockSyncError::ExpectedHeaderNotFound(best_height))?;
-        let best_full_block_hash = best_block.hash();
+            .fetch_header_and_accumulated_data(best_height)
+            .await?;
+
+        let best_full_block_hash = accumulated_data.hash;
         debug!(
             target: LOG_TARGET,
             "Starting block sync from peer `{}`. Current best block is #{} `{}`. Syncing to #{} ({}).",
@@ -154,7 +155,7 @@ impl<B: BlockchainBackend + 'static> BlockSynchronizer<B> {
         let request = SyncBlocksRequest {
             start_hash: best_full_block_hash.clone(),
             // To the tip!
-            end_hash: tip_hash,
+            end_hash: tip_hash.clone(),
         };
 
         let mut block_stream = client.sync_blocks(request).await?;
@@ -165,18 +166,18 @@ impl<B: BlockchainBackend + 'static> BlockSynchronizer<B> {
 
             let header = self
                 .db
-                .fetch_header_by_block_hash(block.hash.clone())
+                .fetch_chain_header_by_block_hash(block.hash.clone())
                 .await?
                 .ok_or_else(|| {
                     BlockSyncError::ReceivedInvalidBlockBody("Peer sent hash for block header we do not have".into())
                 })?;
 
-            let header_hash = header.hash();
+            let header_hash = header.hash().clone();
 
-            if header.prev_hash != prev_hash {
+            if header.header.prev_hash != prev_hash {
                 return Err(BlockSyncError::PeerSentBlockThatDidNotFormAChain {
                     expected: prev_hash.to_hex(),
-                    got: header.prev_hash.to_hex(),
+                    got: header.header.prev_hash.to_hex(),
                 });
             }
 
@@ -186,27 +187,27 @@ impl<B: BlockchainBackend + 'static> BlockSynchronizer<B> {
                 .ok_or_else(|| BlockSyncError::ReceivedInvalidBlockBody("Block body was empty".to_string()))?
                 .map_err(BlockSyncError::ReceivedInvalidBlockBody)?;
 
-            prev_hash = header.hash();
+            prev_hash = header.hash().clone();
 
             debug!(
                 target: LOG_TARGET,
                 "Validating block body #{} (PoW = {}, {})",
-                header.height,
-                header.pow_algo(),
+                header.header.height,
+                header.header.pow_algo(),
                 body.to_counts_string(),
             );
 
             let timer = Instant::now();
-            let block = Arc::new(Block::new(header, body));
+            let block = Arc::new(ChainBlock{ accumulated_data: header.accumulated_data.clone(),  block: Block::new(header.header,body) });
             self.validate_block(block.clone()).await?;
 
             debug!(
                 target: LOG_TARGET,
                 "Validated in {:.0?}. Storing block body #{} (PoW = {}, {})",
                 timer.elapsed(),
-                block.header.height,
-                block.header.pow_algo(),
-                block.body.to_counts_string(),
+                block.block.header.height,
+                block.block.header.pow_algo(),
+                block.block.body.to_counts_string(),
             );
 
             let timer = Instant::now();
@@ -215,7 +216,7 @@ impl<B: BlockchainBackend + 'static> BlockSynchronizer<B> {
                 .insert_block(block.clone())
                 .set_metadata(
                     MetadataKey::ChainHeight,
-                    MetadataValue::ChainHeight(block.header.height),
+                    MetadataValue::ChainHeight(block.block.header.height),
                 )
                 .set_metadata(MetadataKey::BestBlock, MetadataValue::BestBlock(header_hash))
                 .commit()
@@ -227,7 +228,7 @@ impl<B: BlockchainBackend + 'static> BlockSynchronizer<B> {
             debug!(
                 target: LOG_TARGET,
                 "Block body #{} added in {:.0?}",
-                block.header.height,
+                block.block.header.height,
                 timer.elapsed()
             );
             current_block = Some(block);
@@ -235,10 +236,10 @@ impl<B: BlockchainBackend + 'static> BlockSynchronizer<B> {
 
         if let Some(block) = current_block {
             // Update metadata to last tip header
-            let header = &block.header;
+            let header = &block.block.header;
             let height = header.height;
             let best_block = header.hash();
-            let accumulated_difficulty = header.get_proof_of_work()?.total_accumulated_difficulty();
+            let accumulated_difficulty = block.accumulated_data.total_accumulated_difficulty;
             self.db
                 .write_transaction()
                 .set_metadata(MetadataKey::ChainHeight, MetadataValue::ChainHeight(height))
@@ -258,10 +259,10 @@ impl<B: BlockchainBackend + 'static> BlockSynchronizer<B> {
         Ok(())
     }
 
-    async fn validate_block(&self, block: Arc<Block>) -> Result<(), BlockSyncError> {
+    async fn validate_block(&self, block: Arc<ChainBlock>) -> Result<(), BlockSyncError> {
         let validator = self.block_validator.clone();
         task::spawn_blocking(move || {
-            validator.validate(&block)?;
+            validator.validate_body(&block)?;
             Result::<_, BlockSyncError>::Ok(())
         })
         .await

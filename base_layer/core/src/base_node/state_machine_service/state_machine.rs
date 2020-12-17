@@ -38,6 +38,7 @@ use std::{future::Future, sync::Arc};
 use tari_comms::{connectivity::ConnectivityRequester, PeerManager};
 use tari_shutdown::ShutdownSignal;
 use tokio::sync::{broadcast, watch};
+use crate::proof_of_work::randomx_factory::RandomXFactory;
 
 const LOG_TARGET: &str = "c::bn::base_node";
 
@@ -70,6 +71,7 @@ pub struct BaseNodeStateMachine<B> {
     pub(super) bootstrapped_sync: bool,
     pub(super) consensus_rules: ConsensusManager,
     pub(super) status_event_sender: Arc<watch::Sender<StatusInfo>>,
+    pub(super) randomx_factory: RandomXFactory,
     event_publisher: broadcast::Sender<Arc<StateEvent>>,
     interrupt_signal: ShutdownSignal,
 }
@@ -88,6 +90,7 @@ impl<B: BlockchainBackend + 'static> BaseNodeStateMachine<B> {
         sync_validators: SyncValidators,
         status_event_sender: watch::Sender<StatusInfo>,
         event_publisher: broadcast::Sender<Arc<StateEvent>>,
+        randomx_factory: RandomXFactory,
         consensus_rules: ConsensusManager,
         interrupt_signal: ShutdownSignal,
     ) -> Self
@@ -105,6 +108,7 @@ impl<B: BlockchainBackend + 'static> BaseNodeStateMachine<B> {
             status_event_sender: Arc::new(status_event_sender),
             sync_validators,
             bootstrapped_sync: false,
+            randomx_factory,
             consensus_rules,
             interrupt_signal,
         }

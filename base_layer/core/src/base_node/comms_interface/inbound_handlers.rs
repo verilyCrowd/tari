@@ -46,6 +46,7 @@ use strum_macros::Display;
 use tari_comms::peer_manager::NodeId;
 use tari_crypto::tari_utilities::{hash::Hashable, hex::Hex};
 use tokio::sync::Semaphore;
+use crate::chain_storage::ChainBlock;
 
 const LOG_TARGET: &str = "c::bn::comms_interface::inbound_handler";
 const MAX_HEADERS_PER_RESPONSE: u32 = 100;
@@ -56,8 +57,8 @@ const MAX_HEADERS_PER_RESPONSE: u32 = 100;
 pub enum BlockEvent {
     ValidBlockAdded(Arc<Block>, BlockAddResult, Broadcast),
     AddBlockFailed(Arc<Block>, Broadcast),
-    BlockSyncComplete(Arc<Block>),
-    BlockSyncRewind(Vec<Arc<Block>>),
+    BlockSyncComplete(Arc<ChainBlock>),
+    BlockSyncRewind(Vec<Arc<ChainBlock>>),
 }
 
 /// Used to notify if the block event is for a propagated block.
@@ -379,7 +380,7 @@ where T: BlockchainBackend + 'static
                 // let accum_data =
                 // self.blockchain_db.fetch_header_accumulated_data(best_block_header.hash()).await?.ok_or_else(||
                 // CommsInterfaceError::InternalError("Could not find accumulated data for tip".to_string()))?;
-                let mut header = BlockHeader::from_previous(&best_block_header)?;
+                let mut header = BlockHeader::from_previous(&best_block_header.header)?;
                 let constants = self.consensus_manager.consensus_constants(header.height);
                 header.version = constants.blockchain_version();
                 header.pow.pow_algo = pow_algo;

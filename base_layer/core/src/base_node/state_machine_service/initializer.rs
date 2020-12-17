@@ -114,6 +114,7 @@ where B: BlockchainBackend + 'static
                 sync_validators,
                 status_event_sender,
                 state_event_publisher,
+                RandomXFactory::new(RandomXConfig::default()),
                 rules,
                 handles.get_shutdown_signal(),
             );

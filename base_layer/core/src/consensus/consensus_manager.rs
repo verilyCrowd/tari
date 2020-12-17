@@ -155,7 +155,7 @@ struct ConsensusManagerInner {
     /// The configuration for the emission schedule for integer only.
     pub emission: EmissionSchedule,
     /// This allows the user to set a custom Genesis block
-    pub gen_block: Option<Block>,
+    pub gen_block: Option<ChainBlock>,
     /// The comparer used to determine which chain is stronger for reorgs.
     pub chain_strength_comparer: Box<dyn ChainStrengthComparer + Send + Sync>,
 }
@@ -164,7 +164,7 @@ struct ConsensusManagerInner {
 pub struct ConsensusManagerBuilder {
     consensus_constants: Vec<ConsensusConstants>,
     network: Network,
-    gen_block: Option<Block>,
+    gen_block: Option<ChainBlock>,
     chain_strength_comparer: Option<Box<dyn ChainStrengthComparer + Send + Sync>>,
 }
 
@@ -186,7 +186,7 @@ impl ConsensusManagerBuilder {
     }
 
     /// Adds in a custom block to be used. This will be overwritten if the network is anything else than localnet
-    pub fn with_block(mut self, block: Block) -> Self {
+    pub fn with_block(mut self, block: ChainBlock) -> Self {
         self.gen_block = Some(block);
         self
     }

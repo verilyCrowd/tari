@@ -24,7 +24,7 @@ use crate::{
     chain_storage::{BlockchainBackend, BlockchainDatabase, MmrTree},
     tari_utilities::hex::Hex,
     transactions::{transaction::Transaction, types::CryptoFactories},
-    validation::{Validation, ValidationError},
+    validation::{MempoolTransactionValidation, ValidationError},
 };
 use log::*;
 use tari_crypto::tari_utilities::hash::Hashable;
@@ -48,7 +48,7 @@ impl TxInternalConsistencyValidator {
     }
 }
 
-impl Validation<Transaction> for TxInternalConsistencyValidator {
+impl MempoolTransactionValidation for TxInternalConsistencyValidator {
     fn validate(&self, tx: &Transaction) -> Result<(), ValidationError> {
         tx.validate_internal_consistency(&self.factories, None)
             .map_err(ValidationError::TransactionError)?;
@@ -69,7 +69,7 @@ impl<B: BlockchainBackend> TxInputAndMaturityValidator<B> {
     }
 }
 
-impl<B: BlockchainBackend> Validation<Transaction> for TxInputAndMaturityValidator<B> {
+impl<B: BlockchainBackend> MempoolTransactionValidation for TxInputAndMaturityValidator<B> {
     fn validate(&self, tx: &Transaction) -> Result<(), ValidationError> {
         let db = self.db.db_read_access()?;
         verify_not_stxos(tx, &*db)?;

@@ -31,6 +31,7 @@ use prost_types::Timestamp;
 use std::convert::{TryFrom, TryInto};
 use tari_common_types::types::BLOCK_HASH_LENGTH;
 use tari_crypto::tari_utilities::{epoch_time::EpochTime, ByteArray};
+use crate::chain_storage::BlockHeaderAccumulatedData;
 
 /// Utility function that converts a `prost::Timestamp` to a `chrono::DateTime`
 pub(crate) fn timestamp_to_datetime(timestamp: Timestamp) -> EpochTime {
@@ -178,8 +179,21 @@ impl From<HistoricalBlock> for proto::HistoricalBlock {
             confirmations: block.confirmations,
             spent_commitments: vec![],
             block: Some(block.block.into()),
+            accumulated_data: Some(block.accumulated_data.into())
         }
     }
+}
+
+impl From<BlockHeaderAccumulatedData> for proto::BlockHeaderAccumulatedData {
+   fn from(source: BlockHeaderAccumulatedData) -> Self {
+       Self {
+           achieved_difficulty: source.achieved_difficulty.into(),
+           accumulated_monero_difficulty: source.accumulated_monero_difficulty.into(),
+           accumulated_blake_difficulty: source.accumulated_blake_difficulty.into(),
+           target_difficulty: source.target_difficulty.into(),
+           total_kernel_offset: source.total_kernel_offset.to_vec()
+       }
+   }
 }
 
 //--------------------------------- NewBlockTemplate -------------------------------------------//
@@ -242,6 +256,7 @@ impl From<NewBlockHeaderTemplate> for proto::NewBlockHeaderTemplate {
             prev_hash: header.prev_hash,
             total_kernel_offset: header.total_kernel_offset.to_vec(),
             pow: Some(proto::ProofOfWork::from(header.pow)),
+            target_difficulty: header.target_difficulty.into()
         }
     }
 }

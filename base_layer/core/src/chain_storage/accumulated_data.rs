@@ -324,7 +324,18 @@ pub struct ChainHeader {
     pub accumulated_data: BlockHeaderAccumulatedData,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+
+impl ChainHeader {
+    pub fn height(&self) -> u64 {
+        self.header.height
+    }
+
+    pub fn hash(&self) -> &HashOutput {
+        &self.accumulated_data.hash
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct ChainBlock {
     pub accumulated_data: BlockHeaderAccumulatedData,
     pub block: Block,

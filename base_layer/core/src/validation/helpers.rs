@@ -142,7 +142,7 @@ pub fn check_pow_data<B: BlockchainBackend>(
 
             Ok(())
         },
-        Blake | Sha3 => Ok(()),
+        Blake | Sha3 => unimplemented!("Must check that POW data is strictly empty"),
     }
 }
 

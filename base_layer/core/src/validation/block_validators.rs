@@ -42,8 +42,6 @@ use crate::{
             check_timestamp_ftl,
             is_all_unique_and_sorted,
         },
-        StatefulValidation,
-        Validation,
         ValidationError,
     },
 };
@@ -52,23 +50,25 @@ use tari_crypto::{
     commitment::HomomorphicCommitmentFactory,
     tari_utilities::{hash::Hashable, hex::Hex},
 };
+use crate::chain_storage::ChainBlock;
+use crate::validation::{CandidateBlockValidation, OrphanValidation, CandidateBlockBodyValidation};
 
 pub const LOG_TARGET: &str = "c::val::block_validators";
 
 /// This validator tests whether a candidate block is internally consistent
 #[derive(Clone)]
-pub struct StatelessBlockValidator {
+pub struct OrphanBlockValidator {
     rules: ConsensusManager,
     factories: CryptoFactories,
 }
 
-impl StatelessBlockValidator {
+impl OrphanBlockValidator {
     pub fn new(rules: ConsensusManager, factories: CryptoFactories) -> Self {
         Self { rules, factories }
     }
 }
 
-impl Validation<Block> for StatelessBlockValidator {
+impl OrphanValidation for OrphanBlockValidator {
     /// The consensus checks that are done (in order of cheapest to verify to most expensive):
     /// 1. Is the block weight of the block under the prescribed limit?
     /// 1. Does it contain only unique inputs and outputs?
@@ -133,74 +133,10 @@ impl FullConsensusValidator {
         Self { rules, randomx_factory }
     }
 
-    /// Calculates the achieved and target difficulties at the specified height and compares them.
-    fn check_achieved_and_target_difficulty<B: BlockchainBackend>(
-        &self,
-        db: &B,
-        block_header: &BlockHeader,
-    ) -> Result<(), ValidationError>
-    {
-        let pow_algo = block_header.pow.pow_algo;
-        debug!(
-            target: LOG_TARGET,
-            "check_achieved_and_target_difficulty: pow_algo = {}, height = {}", pow_algo, block_header.height,
-        );
 
-        let target = if block_header.height == 0 {
-            1.into()
-        } else {
-            let height = block_header.height;
-            let mut target_difficulties = self.rules.new_target_difficulty(pow_algo, height);
-            // Fetch the target difficulty window for `height - 1` to 0 (or until there are enough data points for the
-            // pow algo)
-            // TODO: This should be removed in favour of `BlockchainDatabase::fetch_target_difficulty`
-            for height in (0..height).rev() {
-                let (header, accumulated_data) = db.fetch_header_and_accumulated_data(height)?;
-                if header.pow.pow_algo == pow_algo {
-                    target_difficulties.add_front(header.timestamp(), accumulated_data.target_difficulty);
-                    if target_difficulties.is_full() {
-                        break;
-                    }
-                }
-            }
-
-            target_difficulties.calculate()
-        };
-
-        check_target_difficulty(block_header, target, &self.randomx_factory)?;
-
-        Ok(())
-    }
-
-    /// This function tests that the block timestamp is greater than the median timestamp at the specified height.
-    fn check_median_timestamp<B: BlockchainBackend>(
-        &self,
-        db: &B,
-        block_header: &BlockHeader,
-    ) -> Result<(), ValidationError>
-    {
-        if block_header.height == 0 {
-            return Ok(()); // Its the genesis block, so we dont have to check median
-        }
-
-        let height = block_header.height - 1;
-        let min_height = height.saturating_sub(
-            self.rules
-                .consensus_constants(block_header.height)
-                .get_median_timestamp_count() as u64,
-        );
-        let timestamps = fetch_headers(db, min_height, height)?
-            .iter()
-            .map(|h| h.timestamp)
-            .collect::<Vec<_>>();
-
-        check_header_timestamp_greater_than_median(block_header, &timestamps)?;
-
-        Ok(())
-    }
 }
 
-impl<B: BlockchainBackend> StatefulValidation<Block, B> for FullConsensusValidator {
+impl<B: BlockchainBackend> CandidateBlockValidation<B> for FullConsensusValidator {
     /// The consensus checks that are done (in order of cheapest to verify to most expensive):
     /// 1. Does the block satisfy the stateless checks?
     /// 1. Are all inputs currently in the UTXO set?
@@ -226,45 +162,13 @@ impl<B: BlockchainBackend> StatefulValidation<Block, B> for FullConsensusValidat
             block_id
         );
         // Validate the block header (PoW etc.)
-        self.validate(&block.header, backend)?;
+       //    self.validate(&block.header, backend)?;
+        unimplemented!("Need to determine if header has been validated");
         debug!(target: LOG_TARGET, "Block validation: Block is VALID for {}", block_id);
         Ok(())
     }
 }
 
-impl<B: BlockchainBackend> StatefulValidation<BlockHeader, B> for FullConsensusValidator {
-    /// The consensus checks that are done (in order of cheapest to verify to most expensive):
-    /// 1. Is the block timestamp within the Future Time Limit (FTL)?
-    /// 1. Is the Proof of Work valid?
-    /// 1. Is the achieved difficulty of this block >= the target difficulty for this block?
-    fn validate(&self, header: &BlockHeader, backend: &B) -> Result<(), ValidationError> {
-        check_timestamp_ftl(&header, &self.rules)?;
-        let header_id = format!("header #{} ({})", header.height, header.hash().to_hex());
-        trace!(
-            target: LOG_TARGET,
-            "BlockHeader validation: FTL timestamp is ok for {} ",
-            header_id
-        );
-        self.check_median_timestamp(backend, header)?;
-        trace!(
-            target: LOG_TARGET,
-            "BlockHeader validation: Median timestamp is ok for {} ",
-            header_id
-        );
-        check_pow_data(header, &self.rules, backend)?;
-        self.check_achieved_and_target_difficulty(backend, header)?;
-        trace!(
-            target: LOG_TARGET,
-            "BlockHeader validation: Achieved difficulty is ok for {} ",
-            header_id
-        );
-        debug!(
-            target: LOG_TARGET,
-            "Block header validation: BlockHeader is VALID for {}", header_id
-        );
-        Ok(())
-    }
-}
 
 // This function checks for duplicate inputs and outputs. There should be no duplicate inputs or outputs in a block
 fn check_sorting_and_duplicates(body: &AggregateBody) -> Result<(), ValidationError> {
@@ -496,22 +400,22 @@ impl<B: BlockchainBackend> BlockValidator<B> {
     }
 }
 
-impl<B: BlockchainBackend> Validation<Block> for BlockValidator<B> {
+impl<B: BlockchainBackend> CandidateBlockBodyValidation for BlockValidator<B> {
     /// The following consensus checks are done:
     /// 1. Does the block satisfy the stateless checks?
     /// 1. Are the block header MMR roots valid?
-    fn validate(&self, block: &Block) -> Result<(), ValidationError> {
-        let block_id = format!("block #{}", block.header.height);
+    fn validate_body(&self, block: &ChainBlock) -> Result<(), ValidationError> {
+        let block_id = format!("block #{}", block.block.header.height);
         trace!(target: LOG_TARGET, "Validating {}", block_id);
 
-        let constants = self.rules.consensus_constants(block.header.height);
-        check_block_weight(&block, &constants)?;
+        let constants = self.rules.consensus_constants(block.block.header.height);
+        check_block_weight(&block.block, &constants)?;
         trace!(target: LOG_TARGET, "SV - Block weight is ok for {} ", &block_id);
 
-        self.check_inputs(&block)?;
-        self.check_outputs(&block)?;
+        self.check_inputs(&block.block)?;
+        self.check_outputs(&block.block)?;
 
-        check_accounting_balance(block, &self.rules, &self.factories)?;
+        check_accounting_balance(&block.block, &self.rules, &self.factories)?;
         trace!(target: LOG_TARGET, "SV - accounting balance correct for {}", &block_id);
         debug!(
             target: LOG_TARGET,
@@ -519,7 +423,7 @@ impl<B: BlockchainBackend> Validation<Block> for BlockValidator<B> {
         );
 
         let db = self.db.db_read_access()?;
-        self.check_mmr_roots(&*db, &block)?;
+        self.check_mmr_roots(&*db, &block.block)?;
         trace!(
             target: LOG_TARGET,
             "Block validation: MMR roots are valid for {}",
