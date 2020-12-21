@@ -69,6 +69,8 @@ impl ProofOfWork {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(256);
         buf.put_u8(self.pow_algo as u8);
+        buf.put_u64_le(self.accumulated_monero_difficulty.as_u64());
+        buf.put_u64_le(self.accumulated_blake_difficulty.as_u64());
         buf.put_slice(&self.pow_data);
         buf
     }

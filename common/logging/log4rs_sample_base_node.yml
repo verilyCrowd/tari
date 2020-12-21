@@ -90,6 +90,10 @@ loggers:
     level: trace
     appenders:
       - base_layer
+  c::bn::block_sync:
+    level: trace
+    appenders:
+      - base_layer
   tari:
     level: info
     appenders:

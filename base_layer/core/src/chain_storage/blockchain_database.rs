@@ -517,6 +517,11 @@ where B: BlockchainBackend
         db.fetch_tip_header()
     }
 
+    pub fn fetch_last_header(&self) -> Result<BlockHeader, ChainStorageError> {
+        let db = self.db_read_access()?;
+        db.fetch_last_header()
+    }
+
     /// Returns the sum of all UTXO commitments
     pub fn fetch_utxo_commitment_sum(&self, at_hash: &HashOutput) -> Result<Commitment, ChainStorageError> {
         Ok(self.fetch_block_accumulated_data(at_hash)?.total_utxo_sum)

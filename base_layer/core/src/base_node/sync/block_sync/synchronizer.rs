@@ -85,7 +85,7 @@ impl<B: BlockchainBackend + 'static> BlockSynchronizer<B> {
     pub async fn synchronize(&mut self) -> Result<(), BlockSyncError> {
         let peer_conn = self.get_next_sync_peer().await?;
         let node_id = peer_conn.peer_node_id().clone();
-        debug!(
+        info!(
             target: LOG_TARGET,
             "Attempting to synchronize blocks with `{}`", node_id
         );
@@ -124,18 +124,18 @@ impl<B: BlockchainBackend + 'static> BlockSynchronizer<B> {
         client: &mut rpc::BaseNodeSyncRpcClient,
     ) -> Result<(), BlockSyncError>
     {
-        let tip_header = self.db.fetch_tip_header().await?;
+        let tip_header = self.db.fetch_last_header().await?;
         let local_metadata = self.db.get_chain_metadata().await?;
-        if tip_header.height() <= local_metadata.height_of_longest_chain() {
+        if tip_header.height <= local_metadata.height_of_longest_chain() {
             debug!(
                 target: LOG_TARGET,
-                "Blocks already synchronized to height {}.", tip_header.height()
+                "Blocks already synchronized to height {}.", tip_header.height
             );
             return Ok(());
         }
 
         let tip_hash = tip_header.hash();
-        let tip_height = tip_header.height();
+        let tip_height = tip_header.height;
         let best_height = local_metadata.height_of_longest_chain();
         let (best_block, accumulated_data) = self
             .db
