@@ -548,7 +548,7 @@ where T: BlockchainBackend + 'static
     {
         let block_hash = block.hash();
         let block_height = block.header.height;
-        debug!(
+        info!(
             target: LOG_TARGET,
             "Block #{} ({}) received from {}",
             block_height,

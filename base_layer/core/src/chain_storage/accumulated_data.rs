@@ -340,3 +340,14 @@ pub struct ChainBlock {
     pub accumulated_data: BlockHeaderAccumulatedData,
     pub block: Block,
 }
+
+
+impl ChainBlock {
+    pub fn height(&self) -> u64 {
+        self.block.header.height
+    }
+
+    pub fn hash(&self) -> &HashOutput {
+        &self.accumulated_data.hash
+    }
+}

@@ -32,15 +32,15 @@ use crate::chain_storage::ChainBlock;
 use crate::validation::{FinalHeaderStateValidation, CandidateBlockBodyValidation};
 
 #[derive(Clone)]
-pub struct SyncValidators {
-    pub block_body: Arc<dyn CandidateBlockBodyValidation>,
+pub struct SyncValidators<B:BlockchainBackend> {
+    pub block_body: Arc<dyn CandidateBlockBodyValidation<B>>,
     pub final_state: Arc<dyn FinalHeaderStateValidation>,
 }
 
-impl SyncValidators {
+impl<B:BlockchainBackend + 'static> SyncValidators<B> {
     pub fn new<TBody, TFinal>(block_body: TBody, final_state: TFinal) -> Self
     where
-        TBody: CandidateBlockBodyValidation + 'static,
+        TBody: CandidateBlockBodyValidation<B> + 'static,
         TFinal: FinalHeaderStateValidation+ 'static,
     {
         Self {
@@ -49,20 +49,20 @@ impl SyncValidators {
         }
     }
 
-    pub fn full_consensus<B: BlockchainBackend + 'static>(
+    pub fn full_consensus(
         db: BlockchainDatabase<B>,
         rules: ConsensusManager,
         factories: CryptoFactories,
     ) -> Self
     {
         Self::new(
-            BlockValidator::new(db.clone(), rules.clone(), factories.clone()),
+            BlockValidator::new(rules.clone(), factories.clone()),
             ChainBalanceValidator::new(db, rules, factories),
         )
     }
 }
 
-impl fmt::Debug for SyncValidators {
+impl<B:BlockchainBackend> fmt::Debug for SyncValidators<B> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HorizonHeaderValidators")
             .field("header", &"...")

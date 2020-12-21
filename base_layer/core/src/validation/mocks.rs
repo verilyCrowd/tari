@@ -20,14 +20,13 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use super::{CandidateBlockValidation};
 use crate::{chain_storage::BlockchainBackend, validation::error::ValidationError};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use crate::validation::{HeaderValidation, OrphanValidation};
-use crate::chain_storage::{BlockHeaderAccumulatedData, BlockHeaderAccumulatedDataBuilder};
+use crate::validation::{HeaderValidation, OrphanValidation, CandidateBlockBodyValidation};
+use crate::chain_storage::{BlockHeaderAccumulatedData, BlockHeaderAccumulatedDataBuilder, ChainBlock};
 use crate::blocks::{BlockHeader, Block};
 
 #[derive(Clone)]
@@ -55,8 +54,8 @@ impl MockValidator {
     }
 }
 
-impl<B: BlockchainBackend> CandidateBlockValidation<B> for MockValidator {
-    fn validate(&self, _item: &Block, _db: &B) -> Result<(), ValidationError> {
+impl<B: BlockchainBackend> CandidateBlockBodyValidation<B> for MockValidator {
+    fn validate_body(&self, _item: &ChainBlock, _db: &B) -> Result<(), ValidationError> {
         if self.is_valid.load(Ordering::SeqCst) {
             Ok(())
         } else {

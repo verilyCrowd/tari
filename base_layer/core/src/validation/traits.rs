@@ -33,14 +33,14 @@ use crate::chain_storage::{ChainBlock, BlockchainBackend};
 // pub type Validator<T> = Box<dyn Validation<T>>;
 
 
-pub trait CandidateBlockValidation< B>: Send + Sync {
-    fn validate(&self, item: &Block, backend: &B) -> Result<(), ValidationError>;
-}
+// pub trait CandidateBlockValidation< B>: Send + Sync {
+//     fn validate(&self, item: &ChainBlock, backend: &B) -> Result<(), ValidationError>;
+// }
 
 /// A validator that determines if a block body is valid, assuming that the header has already been
 /// validated
-pub trait CandidateBlockBodyValidation: Send + Sync {
-    fn validate_body(&self, block: &ChainBlock) -> Result<(), ValidationError>;
+pub trait CandidateBlockBodyValidation<B:BlockchainBackend>: Send + Sync {
+    fn validate_body(&self, block: &ChainBlock, backend: &B) -> Result<(), ValidationError>;
 }
 
 // /// The core validation trait.

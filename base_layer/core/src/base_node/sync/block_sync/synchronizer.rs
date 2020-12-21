@@ -43,7 +43,7 @@ use tari_comms::{
 };
 use tokio::task;
 use crate::chain_storage::ChainBlock;
-use crate::validation::{CandidateBlockValidation, CandidateBlockBodyValidation};
+use crate::validation::{CandidateBlockBodyValidation};
 
 const LOG_TARGET: &str = "c::bn::block_sync";
 
@@ -51,7 +51,7 @@ pub struct BlockSynchronizer<B> {
     db: AsyncBlockchainDb<B>,
     connectivity: ConnectivityRequester,
     sync_peer: Option<PeerConnection>,
-    block_validator: Arc<dyn CandidateBlockBodyValidation>,
+    block_validator: Arc<dyn CandidateBlockBodyValidation<B>>,
     hooks: Hooks,
 }
 
@@ -60,7 +60,7 @@ impl<B: BlockchainBackend + 'static> BlockSynchronizer<B> {
         db: AsyncBlockchainDb<B>,
         connectivity: ConnectivityRequester,
         sync_peer: Option<PeerConnection>,
-        block_validator: Arc<dyn CandidateBlockBodyValidation>,
+        block_validator: Arc<dyn CandidateBlockBodyValidation<B>>,
     ) -> Self
     {
         Self {
@@ -261,8 +261,11 @@ impl<B: BlockchainBackend + 'static> BlockSynchronizer<B> {
 
     async fn validate_block(&self, block: Arc<ChainBlock>) -> Result<(), BlockSyncError> {
         let validator = self.block_validator.clone();
+
+        let db = self.db.clone();
         task::spawn_blocking(move || {
-            validator.validate_body(&block)?;
+            let db = db.inner().db_read_access()?;
+            validator.validate_body(&block, &*db)?;
             Result::<_, BlockSyncError>::Ok(())
         })
         .await

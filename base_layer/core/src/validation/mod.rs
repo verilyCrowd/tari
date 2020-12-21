@@ -43,7 +43,6 @@ pub use traits::{
     // Validator,
     OrphanValidation,
     MempoolTransactionValidation,
-    CandidateBlockValidation,
     CandidateBlockBodyValidation
 
 };

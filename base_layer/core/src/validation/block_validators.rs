@@ -51,7 +51,8 @@ use tari_crypto::{
     tari_utilities::{hash::Hashable, hex::Hex},
 };
 use crate::chain_storage::ChainBlock;
-use crate::validation::{CandidateBlockValidation, OrphanValidation, CandidateBlockBodyValidation};
+use crate::validation::{OrphanValidation, CandidateBlockBodyValidation};
+use std::marker::PhantomData;
 
 pub const LOG_TARGET: &str = "c::val::block_validators";
 
@@ -136,7 +137,7 @@ impl FullConsensusValidator {
 
 }
 
-impl<B: BlockchainBackend> CandidateBlockValidation<B> for FullConsensusValidator {
+impl<B: BlockchainBackend> CandidateBlockBodyValidation<B> for FullConsensusValidator {
     /// The consensus checks that are done (in order of cheapest to verify to most expensive):
     /// 1. Does the block satisfy the stateless checks?
     /// 1. Are all inputs currently in the UTXO set?
@@ -146,24 +147,21 @@ impl<B: BlockchainBackend> CandidateBlockValidation<B> for FullConsensusValidato
     /// 1. Is the block header timestamp greater than the median timestamp?
     /// 1. Is the Proof of Work valid?
     /// 1. Is the achieved difficulty of this block >= the target difficulty for this block?
-    fn validate(&self, block: &Block, backend: &B) -> Result<(), ValidationError> {
-        let block_id = format!("block #{} ({})", block.header.height, block.hash().to_hex());
-        check_inputs_are_utxos(block, backend)?;
-        check_not_duplicate_txos(block, backend)?;
+    fn validate_body(&self, block: &ChainBlock, backend: &B) -> Result<(), ValidationError> {
+        let block_id = format!("block #{} ({})", block.block.header.height, block.hash().to_hex());
+        check_inputs_are_utxos(&block.block, backend)?;
+        check_not_duplicate_txos(&block.block, backend)?;
         trace!(
             target: LOG_TARGET,
             "Block validation: All inputs and outputs are valid for {}",
             block_id
         );
-        check_mmr_roots(block, backend)?;
+        check_mmr_roots(&block.block, backend)?;
         trace!(
             target: LOG_TARGET,
             "Block validation: MMR roots are valid for {}",
             block_id
         );
-        // Validate the block header (PoW etc.)
-       //    self.validate(&block.header, backend)?;
-        unimplemented!("Need to determine if header has been validated");
         debug!(target: LOG_TARGET, "Block validation: Block is VALID for {}", block_id);
         Ok(())
     }
@@ -260,15 +258,15 @@ fn check_mmr_roots<B: BlockchainBackend>(block: &Block, db: &B) -> Result<(), Va
 /// This validator checks whether a block satisfies consensus rules.
 /// It implements two validators: one for the `BlockHeader` and one for `Block`. The `Block` validator ONLY validates
 /// the block body using the header. It is assumed that the `BlockHeader` has already been validated.
-pub struct BlockValidator<B> {
-    db: BlockchainDatabase<B>,
+pub struct BlockValidator<B: BlockchainBackend> {
     rules: ConsensusManager,
     factories: CryptoFactories,
+    phantom_data: PhantomData<B>
 }
 
-impl<B: BlockchainBackend> BlockValidator<B> {
-    pub fn new(db: BlockchainDatabase<B>, rules: ConsensusManager, factories: CryptoFactories) -> Self {
-        Self { db, rules, factories }
+impl<B:BlockchainBackend> BlockValidator<B> {
+    pub fn new( rules: ConsensusManager, factories: CryptoFactories) -> Self {
+        Self {  rules, factories, phantom_data: Default::default() }
     }
 
     /// This function checks that all inputs in the blocks are valid UTXO's to be spend
@@ -400,11 +398,11 @@ impl<B: BlockchainBackend> BlockValidator<B> {
     }
 }
 
-impl<B: BlockchainBackend> CandidateBlockBodyValidation for BlockValidator<B> {
+impl<B: BlockchainBackend> CandidateBlockBodyValidation<B> for BlockValidator<B> {
     /// The following consensus checks are done:
     /// 1. Does the block satisfy the stateless checks?
     /// 1. Are the block header MMR roots valid?
-    fn validate_body(&self, block: &ChainBlock) -> Result<(), ValidationError> {
+    fn validate_body(&self, block: &ChainBlock, backend: &B) -> Result<(), ValidationError> {
         let block_id = format!("block #{}", block.block.header.height);
         trace!(target: LOG_TARGET, "Validating {}", block_id);
 
@@ -422,8 +420,7 @@ impl<B: BlockchainBackend> CandidateBlockBodyValidation for BlockValidator<B> {
             "{} has PASSED stateless VALIDATION check.", &block_id
         );
 
-        let db = self.db.db_read_access()?;
-        self.check_mmr_roots(&*db, &block.block)?;
+        self.check_mmr_roots(backend, &block.block)?;
         trace!(
             target: LOG_TARGET,
             "Block validation: MMR roots are valid for {}",

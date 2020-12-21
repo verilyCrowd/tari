@@ -58,7 +58,7 @@ pub struct BaseNodeStateMachineConfig {
 ///
 /// This struct holds fields that will be used by all the various FSM state instances, including the local blockchain
 /// database and hooks to the p2p network
-pub struct BaseNodeStateMachine<B> {
+pub struct BaseNodeStateMachine<B: BlockchainBackend> {
     pub(super) db: AsyncBlockchainDb<B>,
     pub(super) local_node_interface: LocalNodeCommsInterface,
     pub(super) outbound_nci: OutboundNodeCommsInterface,
@@ -67,7 +67,7 @@ pub struct BaseNodeStateMachine<B> {
     pub(super) metadata_event_stream: broadcast::Receiver<Arc<ChainMetadataEvent>>,
     pub(super) config: BaseNodeStateMachineConfig,
     pub(super) info: StateInfo,
-    pub(super) sync_validators: SyncValidators,
+    pub(super) sync_validators: SyncValidators<B>,
     pub(super) bootstrapped_sync: bool,
     pub(super) consensus_rules: ConsensusManager,
     pub(super) status_event_sender: Arc<watch::Sender<StatusInfo>>,
@@ -87,7 +87,7 @@ impl<B: BlockchainBackend + 'static> BaseNodeStateMachine<B> {
         peer_manager: Arc<PeerManager>,
         metadata_event_stream: broadcast::Receiver<Arc<ChainMetadataEvent>>,
         config: BaseNodeStateMachineConfig,
-        sync_validators: SyncValidators,
+        sync_validators: SyncValidators<B>,
         status_event_sender: watch::Sender<StatusInfo>,
         event_publisher: broadcast::Sender<Arc<StateEvent>>,
         randomx_factory: RandomXFactory,
