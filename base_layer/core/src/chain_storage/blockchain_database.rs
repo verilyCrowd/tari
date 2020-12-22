@@ -494,7 +494,7 @@ where B: BlockchainBackend
     }
 
 
-    /// Returns a connected header in the main chain by block hahs
+    /// Returns a connected header in the main chain by block hash
     pub fn fetch_chain_header_by_block_hash(&self, hash: HashOutput) -> Result<Option<ChainHeader>, ChainStorageError> {
         let db = self.db_read_access()?;
 
