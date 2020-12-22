@@ -22,6 +22,7 @@
 
 use crate::{
     blocks::Block,
+    chain_storage::ChainBlock,
     mempool::{
         error::MempoolError,
         mempool_storage::MempoolStorage,
@@ -31,10 +32,9 @@ use crate::{
         TxStorageResponse,
     },
     transactions::{transaction::Transaction, types::Signature},
+    validation::MempoolTransactionValidation,
 };
 use std::sync::{Arc, RwLock};
-use crate::chain_storage::ChainBlock;
-use crate::validation::MempoolTransactionValidation;
 
 /// The Mempool consists of an Unconfirmed Transaction Pool, Pending Pool, Orphan Pool and Reorg Pool and is responsible
 /// for managing and maintaining all unconfirmed transactions have not yet been included in a block, and transactions

@@ -1,41 +1,48 @@
-use crate::validation::helpers::{check_timestamp_ftl, check_pow_data, check_header_timestamp_greater_than_median, check_target_difficulty};
-use crate::blocks::BlockHeader;
-use crate::validation::{ValidationError, HeaderValidation};
+use crate::{
+    blocks::BlockHeader,
+    chain_storage::{
+        fetch_headers,
+        fetch_target_difficulty,
+        BlockHeaderAccumulatedData,
+        BlockHeaderAccumulatedDataBuilder,
+        BlockchainBackend,
+    },
+    consensus::ConsensusManager,
+    proof_of_work::{randomx_factory::RandomXFactory, Difficulty},
+    validation::{
+        helpers::{
+            check_header_timestamp_greater_than_median,
+            check_pow_data,
+            check_target_difficulty,
+            check_timestamp_ftl,
+        },
+        HeaderValidation,
+        ValidationError,
+    },
+};
 use log::*;
-use crate::chain_storage::{BlockHeaderAccumulatedData, BlockHeaderAccumulatedDataBuilder, BlockchainBackend, fetch_headers};
-use crate::proof_of_work::randomx_factory::RandomXFactory;
-use crate::proof_of_work::Difficulty;
-use crate::chain_storage::fetch_target_difficulty;
-use crate::consensus::ConsensusManager;
-use tari_crypto::tari_utilities::hash::Hashable;
-use tari_crypto::tari_utilities::hex::Hex;
+use tari_crypto::tari_utilities::{hash::Hashable, hex::Hex};
 
 pub const LOG_TARGET: &str = "c::val::block_validators";
 
 pub struct HeaderValidator {
     rules: ConsensusManager,
-    randomx_factory: RandomXFactory
+    randomx_factory: RandomXFactory,
 }
 
 impl HeaderValidator {
-
     pub fn new(rules: ConsensusManager, randomx_factory: RandomXFactory) -> Self {
-        Self {
-            rules, randomx_factory
-        }
+        Self { rules, randomx_factory }
     }
 
-
     /// Calculates the achieved and target difficulties at the specified height and compares them.
-    pub fn check_achieved_and_target_difficulty<B:BlockchainBackend>(
+    pub fn check_achieved_and_target_difficulty<B: BlockchainBackend>(
         &self,
         db: &B,
         block_header: &BlockHeader,
     ) -> Result<(Difficulty, Difficulty), ValidationError>
     {
-        let difficulty_window =
-
-            fetch_target_difficulty(db, &self.rules,  block_header.pow_algo(), block_header.height)?;
+        let difficulty_window = fetch_target_difficulty(db, &self.rules, block_header.pow_algo(), block_header.height)?;
 
         let target = difficulty_window.calculate();
         Ok((
@@ -72,13 +79,20 @@ impl HeaderValidator {
     }
 }
 
-impl<B:BlockchainBackend> HeaderValidation<B> for HeaderValidator {
+impl<B: BlockchainBackend> HeaderValidation<B> for HeaderValidator {
     /// The consensus checks that are done (in order of cheapest to verify to most expensive):
     /// 1. Is the block timestamp within the Future Time Limit (FTL)?
     /// 1. Is the Proof of Work valid?
     /// 1. Is the achieved difficulty of this block >= the target difficulty for this block?
 
-    fn validate(&self, backend: &B, header: &BlockHeader, previous_header: &BlockHeader, previous_data: &BlockHeaderAccumulatedData) -> Result<BlockHeaderAccumulatedDataBuilder, ValidationError> {
+    fn validate(
+        &self,
+        backend: &B,
+        header: &BlockHeader,
+        previous_header: &BlockHeader,
+        previous_data: &BlockHeaderAccumulatedData,
+    ) -> Result<BlockHeaderAccumulatedDataBuilder, ValidationError>
+    {
         check_timestamp_ftl(&header, &self.rules)?;
         let hash = header.hash();
         let header_id = format!("header #{} ({})", header.height, header.hash().to_hex());

@@ -53,9 +53,7 @@ pub use blockchain_database::{
 };
 
 mod blockchain_backend;
-pub use blockchain_backend:: {
-    BlockchainBackend
-};
+pub use blockchain_backend::BlockchainBackend;
 
 mod consts;
 
@@ -87,5 +85,3 @@ pub use lmdb_db::{
 
 mod target_difficulties;
 pub use target_difficulties::TargetDifficulties;
-
-

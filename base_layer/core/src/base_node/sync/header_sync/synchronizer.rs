@@ -27,8 +27,9 @@ use crate::{
         sync::{hooks::Hooks, rpc, BlockSyncConfig},
     },
     blocks::{Block, BlockHeader},
-    chain_storage::{async_db::AsyncBlockchainDb, BlockchainBackend},
+    chain_storage::{async_db::AsyncBlockchainDb, BlockchainBackend, ChainBlock},
     consensus::ConsensusManager,
+    proof_of_work::randomx_factory::RandomXFactory,
     proto::base_node::{FindChainSplitRequest, SyncHeadersRequest},
     tari_utilities::{hex::Hex, Hashable},
     transactions::types::HashOutput,
@@ -43,8 +44,6 @@ use tari_comms::{
     protocol::rpc::RpcError,
     PeerConnection,
 };
-use crate::chain_storage::ChainBlock;
-use crate::proof_of_work::randomx_factory::RandomXFactory;
 
 const LOG_TARGET: &str = "c::bn::header_sync";
 
@@ -64,7 +63,7 @@ impl<'a, B: BlockchainBackend + 'static> HeaderSynchronizer<'a, B> {
         consensus_rules: ConsensusManager,
         connectivity: ConnectivityRequester,
         sync_peers: &'a [NodeId],
-        randomx_factory: RandomXFactory
+        randomx_factory: RandomXFactory,
     ) -> Self
     {
         Self {
@@ -466,7 +465,11 @@ impl<'a, B: BlockchainBackend + 'static> HeaderSynchronizer<'a, B> {
             }
             let chain_header = self.header_validator.validate_and_calculate_metadata(header)?;
             let current_height = chain_header.height();
-            self.db.write_transaction().insert_header(chain_header.header, chain_header.accumulated_data).commit().await?;
+            self.db
+                .write_transaction()
+                .insert_header(chain_header.header, chain_header.accumulated_data)
+                .commit()
+                .await?;
 
             self.hooks
                 .call_on_progress_header_hooks(current_height, current_height, self.sync_peers);

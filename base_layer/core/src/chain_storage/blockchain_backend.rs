@@ -1,9 +1,22 @@
-use crate::chain_storage::{DbTransaction, ChainStorageError, DbValue, DbKey, BlockHeaderAccumulatedData, ChainHeader, BlockAccumulatedData, MmrTree};
-use crate::blocks::{BlockHeader, Block};
-use crate::transactions::types::{HashOutput, Signature};
-use crate::transactions::transaction::{TransactionKernel, TransactionOutput, TransactionInput};
-use tari_mmr::{Hash};
+use crate::{
+    blocks::{Block, BlockHeader},
+    chain_storage::{
+        BlockAccumulatedData,
+        BlockHeaderAccumulatedData,
+        ChainHeader,
+        ChainStorageError,
+        DbKey,
+        DbTransaction,
+        DbValue,
+        MmrTree,
+    },
+    transactions::{
+        transaction::{TransactionInput, TransactionKernel, TransactionOutput},
+        types::{HashOutput, Signature},
+    },
+};
 use tari_common_types::chain_metadata::ChainMetadata;
+use tari_mmr::Hash;
 
 /// Identify behaviour for Blockchain database back ends. Implementations must support `Send` and `Sync` so that
 /// `BlockchainDatabase` can be thread-safe. The backend *must* also execute transactions atomically; i.e., every
@@ -40,10 +53,7 @@ pub trait BlockchainBackend: Send + Sync {
         hash: &HashOutput,
     ) -> Result<Option<BlockHeaderAccumulatedData>, ChainStorageError>;
 
-    fn fetch_chain_header_in_all_chains(
-        &self,
-        hash: &HashOutput
-    ) -> Result<Option<ChainHeader>, ChainStorageError>;
+    fn fetch_chain_header_in_all_chains(&self, hash: &HashOutput) -> Result<Option<ChainHeader>, ChainStorageError>;
 
     /// Used to determine if the database is empty, i.e. a brand new database.
     /// This is called to decide if the genesis block should be created.

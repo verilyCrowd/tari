@@ -62,7 +62,7 @@ impl HeaderSync {
             shared.consensus_rules.clone(),
             shared.connectivity.clone(),
             sync_peers,
-            shared.randomx_factory.clone()
+            shared.randomx_factory.clone(),
         );
 
         let status_event_sender = shared.status_event_sender.clone();

@@ -22,26 +22,29 @@
 
 use crate::{
     blocks::{Block, BlockHeader},
-    chain_storage::{BlockchainBackend, BlockchainDatabase},
+    chain_storage::{BlockchainBackend, BlockchainDatabase, ChainBlock},
     consensus::ConsensusManager,
     transactions::types::CryptoFactories,
-    validation::{block_validators::BlockValidator, ChainBalanceValidator},
+    validation::{
+        block_validators::BlockValidator,
+        CandidateBlockBodyValidation,
+        ChainBalanceValidator,
+        FinalHeaderStateValidation,
+    },
 };
 use std::{fmt, sync::Arc};
-use crate::chain_storage::ChainBlock;
-use crate::validation::{FinalHeaderStateValidation, CandidateBlockBodyValidation};
 
 #[derive(Clone)]
-pub struct SyncValidators<B:BlockchainBackend> {
+pub struct SyncValidators<B: BlockchainBackend> {
     pub block_body: Arc<dyn CandidateBlockBodyValidation<B>>,
     pub final_state: Arc<dyn FinalHeaderStateValidation>,
 }
 
-impl<B:BlockchainBackend + 'static> SyncValidators<B> {
+impl<B: BlockchainBackend + 'static> SyncValidators<B> {
     pub fn new<TBody, TFinal>(block_body: TBody, final_state: TFinal) -> Self
     where
         TBody: CandidateBlockBodyValidation<B> + 'static,
-        TFinal: FinalHeaderStateValidation+ 'static,
+        TFinal: FinalHeaderStateValidation + 'static,
     {
         Self {
             block_body: Arc::new(block_body),
@@ -49,12 +52,7 @@ impl<B:BlockchainBackend + 'static> SyncValidators<B> {
         }
     }
 
-    pub fn full_consensus(
-        db: BlockchainDatabase<B>,
-        rules: ConsensusManager,
-        factories: CryptoFactories,
-    ) -> Self
-    {
+    pub fn full_consensus(db: BlockchainDatabase<B>, rules: ConsensusManager, factories: CryptoFactories) -> Self {
         Self::new(
             BlockValidator::new(rules.clone(), factories.clone()),
             ChainBalanceValidator::new(db, rules, factories),
@@ -62,7 +60,7 @@ impl<B:BlockchainBackend + 'static> SyncValidators<B> {
     }
 }
 
-impl<B:BlockchainBackend> fmt::Debug for SyncValidators<B> {
+impl<B: BlockchainBackend> fmt::Debug for SyncValidators<B> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HorizonHeaderValidators")
             .field("header", &"...")

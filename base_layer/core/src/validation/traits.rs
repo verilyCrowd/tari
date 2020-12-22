@@ -21,17 +21,14 @@
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 use crate::{
-    blocks::BlockHeader,
-    chain_storage::{BlockHeaderAccumulatedData, BlockHeaderAccumulatedDataBuilder},
-    validation::{error::ValidationError},
+    blocks::{Block, BlockHeader},
+    chain_storage::{BlockHeaderAccumulatedData, BlockHeaderAccumulatedDataBuilder, BlockchainBackend, ChainBlock},
+    transactions::transaction::Transaction,
+    validation::error::ValidationError,
 };
-use crate::blocks::Block;
-use crate::transactions::transaction::Transaction;
-use crate::chain_storage::{ChainBlock, BlockchainBackend};
 
 // pub type StatefulValidator<T, B> = Box<dyn StatefulValidation<T, B>>;
 // pub type Validator<T> = Box<dyn Validation<T>>;
-
 
 // pub trait CandidateBlockValidation< B>: Send + Sync {
 //     fn validate(&self, item: &ChainBlock, backend: &B) -> Result<(), ValidationError>;
@@ -39,7 +36,7 @@ use crate::chain_storage::{ChainBlock, BlockchainBackend};
 
 /// A validator that determines if a block body is valid, assuming that the header has already been
 /// validated
-pub trait CandidateBlockBodyValidation<B:BlockchainBackend>: Send + Sync {
+pub trait CandidateBlockBodyValidation<B: BlockchainBackend>: Send + Sync {
     fn validate_body(&self, block: &ChainBlock, backend: &B) -> Result<(), ValidationError>;
 }
 
@@ -51,14 +48,14 @@ pub trait CandidateBlockBodyValidation<B:BlockchainBackend>: Send + Sync {
 // }
 
 pub trait MempoolTransactionValidation: Send + Sync {
-   fn validate(&self, transaction: &Transaction) -> Result<(), ValidationError>;
+    fn validate(&self, transaction: &Transaction) -> Result<(), ValidationError>;
 }
 
 pub trait OrphanValidation: Send + Sync {
     fn validate(&self, item: &Block) -> Result<(), ValidationError>;
 }
 
-pub trait HeaderValidation<B:BlockchainBackend>: Send + Sync {
+pub trait HeaderValidation<B: BlockchainBackend>: Send + Sync {
     fn validate(
         &self,
         db: &B,

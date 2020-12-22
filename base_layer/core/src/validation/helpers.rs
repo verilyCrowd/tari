@@ -144,10 +144,12 @@ pub fn check_pow_data<B: BlockchainBackend>(
         },
         Blake | Sha3 => {
             if block_header.pow.pow_data.len() > 0 {
-                return Err(ValidationError::CustomError("Proof of work data must be empty for Sha3 blocks".to_string()))
+                return Err(ValidationError::CustomError(
+                    "Proof of work data must be empty for Sha3 blocks".to_string(),
+                ));
             }
             Ok(())
-        }
+        },
     }
 }
 

@@ -22,10 +22,9 @@
 
 #![allow(clippy::type_complexity)]
 
-use crate::blocks::Block;
+use crate::{blocks::Block, chain_storage::ChainBlock};
 use std::sync::Arc;
 use tari_comms::peer_manager::NodeId;
-use crate::chain_storage::ChainBlock;
 
 #[derive(Default)]
 pub(super) struct Hooks {
@@ -52,7 +51,13 @@ impl Hooks {
         self.on_progress_block.push(Box::new(hook));
     }
 
-    pub fn call_on_progress_block_hooks(&mut self, block: Arc<ChainBlock>, remote_tip_height: u64, sync_peers: &[NodeId]) {
+    pub fn call_on_progress_block_hooks(
+        &mut self,
+        block: Arc<ChainBlock>,
+        remote_tip_height: u64,
+        sync_peers: &[NodeId],
+    )
+    {
         self.on_progress_block
             .iter_mut()
             .for_each(|f| (*f)(block.clone(), remote_tip_height, sync_peers));

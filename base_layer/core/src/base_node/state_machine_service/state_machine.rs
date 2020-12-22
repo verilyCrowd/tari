@@ -31,6 +31,7 @@ use crate::{
     },
     chain_storage::{async_db::AsyncBlockchainDb, BlockchainBackend},
     consensus::ConsensusManager,
+    proof_of_work::randomx_factory::RandomXFactory,
 };
 use futures::{future, future::Either};
 use log::*;
@@ -38,7 +39,6 @@ use std::{future::Future, sync::Arc};
 use tari_comms::{connectivity::ConnectivityRequester, PeerManager};
 use tari_shutdown::ShutdownSignal;
 use tokio::sync::{broadcast, watch};
-use crate::proof_of_work::randomx_factory::RandomXFactory;
 
 const LOG_TARGET: &str = "c::bn::base_node";
 

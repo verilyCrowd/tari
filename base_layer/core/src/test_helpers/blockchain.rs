@@ -50,10 +50,7 @@ use crate::{
         transaction::{TransactionInput, TransactionKernel, TransactionOutput},
         types::{CryptoFactories, HashOutput, Signature},
     },
-    validation::{
-        block_validators::{FullConsensusValidator, },
-        mocks::MockValidator,
-    },
+    validation::{block_validators::FullConsensusValidator, mocks::MockValidator},
 };
 use std::{
     fs,
@@ -184,7 +181,7 @@ impl BlockchainBackend for TempDatabase {
     }
 
     fn fetch_chain_header_in_all_chains(&self, hash: &HashOutput) -> Result<Option<ChainHeader>, ChainStorageError> {
-        unimplemented!()
+        self.db.fetch_chain_header_in_all_chains(hash)
     }
 
     fn is_empty(&self) -> Result<bool, ChainStorageError> {

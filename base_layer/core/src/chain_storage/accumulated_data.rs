@@ -324,7 +324,6 @@ pub struct ChainHeader {
     pub accumulated_data: BlockHeaderAccumulatedData,
 }
 
-
 impl ChainHeader {
     pub fn height(&self) -> u64 {
         self.header.height
@@ -340,7 +339,6 @@ pub struct ChainBlock {
     pub accumulated_data: BlockHeaderAccumulatedData,
     pub block: Block,
 }
-
 
 impl ChainBlock {
     pub fn height(&self) -> u64 {

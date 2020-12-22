@@ -50,10 +50,7 @@ use tari_core::{
         OutboundMempoolServiceInterface,
     },
     test_helpers::blockchain::{create_store_with_consensus_and_validators, TempDatabase},
-    validation::{
-        mocks::MockValidator,
-        transaction_validators::TxInputAndMaturityValidator,
-    },
+    validation::{mocks::MockValidator, transaction_validators::TxInputAndMaturityValidator},
 };
 use tari_p2p::{
     comms_connector::{pubsub_connector, InboundDomainConnector, PeerMessage},

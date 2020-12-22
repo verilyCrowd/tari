@@ -23,7 +23,6 @@ use crate::{
     blocks::{block_header::BlockHeader, Block},
     chain_storage::{
         accumulated_data::{BlockAccumulatedData, BlockHeaderAccumulatedData},
-        BlockchainBackend,
         db_transaction::{DbKey, DbTransaction, DbValue, MetadataValue, MmrTree, WriteOperation},
         error::ChainStorageError,
         lmdb_db::{
@@ -63,6 +62,7 @@ use crate::{
             LMDB_DB_TXOS_HASH_TO_INDEX,
             LMDB_DB_UTXOS,
         },
+        BlockchainBackend,
         ChainHeader,
         MetadataKey,
     },
@@ -242,8 +242,13 @@ impl LMDBDatabase {
                 },
                 InsertChainOrphanBlock(chain_block) => {
                     self.insert_orphan_block(&write_txn, &chain_block.block)?;
-                    lmdb_replace(&write_txn, &self.orphan_header_accumulated_data_db, chain_block.accumulated_data.hash.as_slice(), &chain_block.accumulated_data)?;
-                }
+                    lmdb_replace(
+                        &write_txn,
+                        &self.orphan_header_accumulated_data_db,
+                        chain_block.accumulated_data.hash.as_slice(),
+                        &chain_block.accumulated_data,
+                    )?;
+                },
             }
         }
         write_txn
@@ -733,15 +738,13 @@ impl BlockchainBackend for LMDBDatabase {
                     },
                 }
             },
-            DbKey::OrphanBlock(k) => {
-                self.fetch_orphan(&txn,k)?.map(|val| DbValue::OrphanBlock(Box::new(val)))
-            },
+            DbKey::OrphanBlock(k) => self
+                .fetch_orphan(&txn, k)?
+                .map(|val| DbValue::OrphanBlock(Box::new(val))),
         };
         trace!(target: LOG_TARGET, "Fetched key {} in {:.0?}", key, mark.elapsed());
         Ok(res)
     }
-
-
 
     fn contains(&self, key: &DbKey) -> Result<bool, ChainStorageError> {
         let txn = ReadTransaction::new(&*self.env).map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
@@ -789,7 +792,7 @@ impl BlockchainBackend for LMDBDatabase {
 
         if let Some(h) = height {
             self.fetch_header_accumulated_data_by_height(h, &txn)
-        } else{
+        } else {
             Ok(None)
         }
     }
@@ -801,19 +804,20 @@ impl BlockchainBackend for LMDBDatabase {
         if let Some(h) = height {
             let (header, accum) = self.fetch_header_and_accumulated_data(h)?;
 
-            return Ok(Some(ChainHeader{
+            return Ok(Some(ChainHeader {
                 header,
-                accumulated_data: accum
+                accumulated_data: accum,
             }));
         }
-            let orphan_accum: Option<BlockHeaderAccumulatedData> = lmdb_get(&txn, &self.orphan_header_accumulated_data_db, hash.as_slice())?;
-            if let Some(accum) = orphan_accum {
-                if let Some(orphan) = self.fetch_orphan(&txn, hash)?{
-                    return Ok(Some(ChainHeader{
-                        header: orphan.header,
-                        accumulated_data: accum
-                    }))
-                }
+        let orphan_accum: Option<BlockHeaderAccumulatedData> =
+            lmdb_get(&txn, &self.orphan_header_accumulated_data_db, hash.as_slice())?;
+        if let Some(accum) = orphan_accum {
+            if let Some(orphan) = self.fetch_orphan(&txn, hash)? {
+                return Ok(Some(ChainHeader {
+                    header: orphan.header,
+                    accumulated_data: accum,
+                }));
+            }
         }
         Ok(None)
     }
@@ -1100,15 +1104,14 @@ impl BlockchainBackend for LMDBDatabase {
         trace!(target: LOG_TARGET, "Call to fetch_orphan_chain_tips()");
         let txn = ReadTransaction::new(&*self.env).map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
         if lmdb_get::<_, HashOutput>(&txn, &self.orphan_chain_tips_db, hash.as_slice())?.is_some() {
-            let orphan :
-            Block = lmdb_get(&txn, &self.orphans_db, hash.as_slice())?.ok_or_else (|| {
-                ChainStorageError::ValueNotFound {
+            let orphan: Block =
+                lmdb_get(&txn, &self.orphans_db, hash.as_slice())?.ok_or_else(|| ChainStorageError::ValueNotFound {
                     entity: "Orphan".to_string(),
                     field: "hash".to_string(),
-                    value: hash.to_hex()
-                }
-            })?;
-                let accum_data = lmdb_get(&txn, &self.orphan_header_accumulated_data_db, hash.as_slice())?.ok_or_else(|| {
+                    value: hash.to_hex(),
+                })?;
+            let accum_data =
+                lmdb_get(&txn, &self.orphan_header_accumulated_data_db, hash.as_slice())?.ok_or_else(|| {
                     ChainStorageError::ValueNotFound {
                         entity: "Orphan accumulated data".to_string(),
                         field: "hash".to_string(),
@@ -1117,9 +1120,9 @@ impl BlockchainBackend for LMDBDatabase {
                 })?;
             Ok(Some(ChainHeader {
                 header: orphan.header,
-                accumulated_data: accum_data
+                accumulated_data: accum_data,
             }))
-        } else{
+        } else {
             Ok(None)
         }
     }
@@ -1131,13 +1134,15 @@ impl BlockchainBackend for LMDBDatabase {
             hash.to_hex()
         );
         let txn = ReadTransaction::new(&*self.env).map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
-        let orphan_hashes : Vec<HashOutput> = lmdb_get_multiple(&txn, &self.orphan_parent_map_index, hash.as_slice())?;
+        let orphan_hashes: Vec<HashOutput> = lmdb_get_multiple(&txn, &self.orphan_parent_map_index, hash.as_slice())?;
         let mut res = vec![];
         for hash in orphan_hashes {
-            res.push(lmdb_get(&txn, &self.orphans_db, hash.as_slice())?.ok_or_else(|| ChainStorageError::ValueNotFound {
-                entity: "Orphan".to_string(),
-                field: "hash".to_string(),
-                value: hash.to_hex()
+            res.push(lmdb_get(&txn, &self.orphans_db, hash.as_slice())?.ok_or_else(|| {
+                ChainStorageError::ValueNotFound {
+                    entity: "Orphan".to_string(),
+                    field: "hash".to_string(),
+                    value: hash.to_hex(),
+                }
             })?)
         }
         Ok(res)

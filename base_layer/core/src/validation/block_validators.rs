@@ -22,7 +22,7 @@
 use crate::{
     blocks::{block_header::BlockHeader, Block, BlockValidationError},
     chain_storage,
-    chain_storage::{fetch_headers, BlockchainBackend, BlockchainDatabase, MmrTree},
+    chain_storage::{fetch_headers, BlockchainBackend, BlockchainDatabase, ChainBlock, MmrTree},
     consensus::ConsensusManager,
     proof_of_work::randomx_factory::RandomXFactory,
     transactions::{
@@ -42,17 +42,17 @@ use crate::{
             check_timestamp_ftl,
             is_all_unique_and_sorted,
         },
+        CandidateBlockBodyValidation,
+        OrphanValidation,
         ValidationError,
     },
 };
 use log::*;
+use std::marker::PhantomData;
 use tari_crypto::{
     commitment::HomomorphicCommitmentFactory,
     tari_utilities::{hash::Hashable, hex::Hex},
 };
-use crate::chain_storage::ChainBlock;
-use crate::validation::{OrphanValidation, CandidateBlockBodyValidation};
-use std::marker::PhantomData;
 
 pub const LOG_TARGET: &str = "c::val::block_validators";
 
@@ -133,20 +133,16 @@ impl FullConsensusValidator {
     pub fn new(rules: ConsensusManager, randomx_factory: RandomXFactory) -> Self {
         Self { rules, randomx_factory }
     }
-
-
 }
 
+// TODO: This could use a better name. It previously would do a full validation, but now does not
+// do the Orphan or Header validation
 impl<B: BlockchainBackend> CandidateBlockBodyValidation<B> for FullConsensusValidator {
     /// The consensus checks that are done (in order of cheapest to verify to most expensive):
     /// 1. Does the block satisfy the stateless checks?
     /// 1. Are all inputs currently in the UTXO set?
     /// 1. Are all inputs and outputs not in the STXO set?
     /// 1. Are the block header MMR roots valid?
-    /// 1. Is the block header timestamp less than the ftl?
-    /// 1. Is the block header timestamp greater than the median timestamp?
-    /// 1. Is the Proof of Work valid?
-    /// 1. Is the achieved difficulty of this block >= the target difficulty for this block?
     fn validate_body(&self, block: &ChainBlock, backend: &B) -> Result<(), ValidationError> {
         let block_id = format!("block #{} ({})", block.block.header.height, block.hash().to_hex());
         check_inputs_are_utxos(&block.block, backend)?;
@@ -166,7 +162,6 @@ impl<B: BlockchainBackend> CandidateBlockBodyValidation<B> for FullConsensusVali
         Ok(())
     }
 }
-
 
 // This function checks for duplicate inputs and outputs. There should be no duplicate inputs or outputs in a block
 fn check_sorting_and_duplicates(body: &AggregateBody) -> Result<(), ValidationError> {
@@ -261,12 +256,16 @@ fn check_mmr_roots<B: BlockchainBackend>(block: &Block, db: &B) -> Result<(), Va
 pub struct BlockValidator<B: BlockchainBackend> {
     rules: ConsensusManager,
     factories: CryptoFactories,
-    phantom_data: PhantomData<B>
+    phantom_data: PhantomData<B>,
 }
 
-impl<B:BlockchainBackend> BlockValidator<B> {
-    pub fn new( rules: ConsensusManager, factories: CryptoFactories) -> Self {
-        Self {  rules, factories, phantom_data: Default::default() }
+impl<B: BlockchainBackend> BlockValidator<B> {
+    pub fn new(rules: ConsensusManager, factories: CryptoFactories) -> Self {
+        Self {
+            rules,
+            factories,
+            phantom_data: Default::default(),
+        }
     }
 
     /// This function checks that all inputs in the blocks are valid UTXO's to be spend

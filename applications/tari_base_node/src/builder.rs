@@ -46,8 +46,9 @@ use tari_core::{
     proof_of_work::randomx_factory::{RandomXConfig, RandomXFactory},
     transactions::types::CryptoFactories,
     validation::{
-        block_validators::{FullConsensusValidator},
-        transaction_validators::{TxInputAndMaturityValidator, TxInternalConsistencyValidator},
+        block_validators::{FullConsensusValidator, OrphanBlockValidator},
+        header_validator::HeaderValidator,
+        transaction_validators::{MempoolValidator, TxInputAndMaturityValidator, TxInternalConsistencyValidator},
     },
 };
 use tari_service_framework::ServiceHandles;
@@ -64,9 +65,6 @@ use tokio::{
     task,
     time::delay_for,
 };
-use tari_core::validation::header_validator::HeaderValidator;
-use tari_core::validation::block_validators::OrphanBlockValidator;
-use tari_core::validation::transaction_validators::MempoolValidator;
 
 const LOG_TARGET: &str = "c::bn::initialization";
 
@@ -316,8 +314,10 @@ async fn build_node_context(
         pruning_interval: config.pruned_mode_cleanup_interval,
     };
     let blockchain_db = BlockchainDatabase::new(backend, &rules, validators, db_config, cleanup_orphans_at_startup)?;
-    let mempool_validator = MempoolValidator::new(vec![Box::new(TxInternalConsistencyValidator::new(factories.clone())),
-        Box::new(TxInputAndMaturityValidator::new(blockchain_db.clone()))]);
+    let mempool_validator = MempoolValidator::new(vec![
+        Box::new(TxInternalConsistencyValidator::new(factories.clone())),
+        Box::new(TxInputAndMaturityValidator::new(blockchain_db.clone())),
+    ]);
     let mempool = Mempool::new(MempoolConfig::default(), mempool_validator);
 
     //---------------------------------- Base Node  --------------------------------------------//

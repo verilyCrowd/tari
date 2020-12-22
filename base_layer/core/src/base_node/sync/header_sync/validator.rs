@@ -23,11 +23,20 @@
 use crate::{
     base_node::sync::BlockHeaderSyncError,
     blocks::BlockHeader,
-    chain_storage::{async_db::AsyncBlockchainDb, BlockchainBackend, TargetDifficulties, Optional},
+    chain_storage::{
+        async_db::AsyncBlockchainDb,
+        BlockHeaderAccumulatedData,
+        BlockHeaderAccumulatedDataBuilder,
+        BlockchainBackend,
+        ChainHeader,
+        ChainStorageError,
+        Optional,
+        TargetDifficulties,
+    },
     common::rolling_vec::RollingVec,
     consensus::ConsensusManager,
-    proof_of_work::PowAlgorithm,
-    tari_utilities::{epoch_time::EpochTime, hex::Hex, hash::Hashable},
+    proof_of_work::{randomx_factory::RandomXFactory, PowAlgorithm},
+    tari_utilities::{epoch_time::EpochTime, hash::Hashable, hex::Hex},
     transactions::types::HashOutput,
     validation::helpers::{
         check_header_timestamp_greater_than_median,
@@ -38,8 +47,6 @@ use crate::{
 };
 use log::*;
 use std::cmp::Ordering;
-use crate::chain_storage::{BlockHeaderAccumulatedData, BlockHeaderAccumulatedDataBuilder, ChainHeader, ChainStorageError};
-use crate::proof_of_work::randomx_factory::RandomXFactory;
 
 const LOG_TARGET: &str = "c::bn::header_sync";
 
@@ -48,7 +55,7 @@ pub struct BlockHeaderSyncValidator<B> {
     db: AsyncBlockchainDb<B>,
     state: Option<State>,
     consensus_rules: ConsensusManager,
-    randomx_factory: RandomXFactory
+    randomx_factory: RandomXFactory,
 }
 
 #[derive(Debug, Clone)]
@@ -65,7 +72,7 @@ impl<B: BlockchainBackend + 'static> BlockHeaderSyncValidator<B> {
             db,
             state: None,
             consensus_rules,
-            randomx_factory
+            randomx_factory,
         }
     }
 
@@ -77,11 +84,15 @@ impl<B: BlockchainBackend + 'static> BlockHeaderSyncValidator<B> {
             .ok_or_else(|| BlockHeaderSyncError::StartHashNotFound(start_hash.to_hex()))?;
         let timestamps = self.db.fetch_block_timestamps(start_hash.clone()).await?;
         let target_difficulties = self.db.fetch_target_difficulties(start_hash.clone()).await?;
-        let previous_accum =  self.db.fetch_header_accumulated_data(start_hash.clone()).await?.ok_or_else(|| ChainStorageError::ValueNotFound{
-            entity: "BlockHeaderAccumulatedData".to_string(),
-            field: "hash".to_string(),
-            value: start_hash.to_hex()
-        })?;
+        let previous_accum = self
+            .db
+            .fetch_header_accumulated_data(start_hash.clone())
+            .await?
+            .ok_or_else(|| ChainStorageError::ValueNotFound {
+                entity: "BlockHeaderAccumulatedData".to_string(),
+                field: "hash".to_string(),
+                value: start_hash.to_hex(),
+            })?;
         debug!(
             target: LOG_TARGET,
             "Setting header validator state ({} timestamp(s), target difficulties: {} SHA3, {} Monero)",
@@ -93,13 +104,17 @@ impl<B: BlockchainBackend + 'static> BlockHeaderSyncValidator<B> {
             current_height: start_header.height,
             timestamps,
             target_difficulties,
-            previous_accum
+            previous_accum,
         });
 
         Ok(())
     }
 
-    pub fn validate_and_calculate_metadata(&mut self, header: BlockHeader) -> Result<ChainHeader, BlockHeaderSyncError> {
+    pub fn validate_and_calculate_metadata(
+        &mut self,
+        header: BlockHeader,
+    ) -> Result<ChainHeader, BlockHeaderSyncError>
+    {
         let expected_height = self.state().current_height + 1;
         if header.height != expected_height {
             return Err(BlockHeaderSyncError::InvalidBlockHeight(expected_height, header.height));
@@ -111,7 +126,12 @@ impl<B: BlockchainBackend + 'static> BlockHeaderSyncValidator<B> {
 
         let target_difficulty = state.target_difficulties.get(header.pow_algo()).calculate();
         let achieved = check_target_difficulty(&header, target_difficulty, &self.randomx_factory)?;
-        let metadata = BlockHeaderAccumulatedDataBuilder::default().hash(header.hash()).target_difficulty(target_difficulty).achieved_difficulty(&state.previous_accum, header.pow_algo(), achieved).total_kernel_offset(&state.previous_accum.total_kernel_offset, &header.total_kernel_offset).build()?;
+        let metadata = BlockHeaderAccumulatedDataBuilder::default()
+            .hash(header.hash())
+            .target_difficulty(target_difficulty)
+            .achieved_difficulty(&state.previous_accum, header.pow_algo(), achieved)
+            .total_kernel_offset(&state.previous_accum.total_kernel_offset, &header.total_kernel_offset)
+            .build()?;
         check_pow_data(&header, &self.consensus_rules, &*self.db.inner().db_read_access()?)?;
 
         // Header is valid, add this header onto the validation state for the next round
@@ -131,21 +151,33 @@ impl<B: BlockchainBackend + 'static> BlockHeaderSyncValidator<B> {
         state.target_difficulties.add_back(&header, target_difficulty);
         state.previous_accum = metadata.clone();
 
-        Ok(ChainHeader{ header, accumulated_data: metadata})
+        Ok(ChainHeader {
+            header,
+            accumulated_data: metadata,
+        })
     }
 
     pub async fn check_stronger_chain(&mut self, their_header: &ChainHeader) -> Result<(), BlockHeaderSyncError> {
         // Compare their header to ours at the same height, or if we don't have a header at that height, our current tip
         // header
-        let our_header = match self.db.fetch_header_and_accumulated_data(their_header.height()).await.optional()? {
-            Some(h) => ChainHeader{ header: h.0, accumulated_data: h.1},
-            None =>
-                self.db.fetch_tip_header().await?
+        let our_header = match self
+            .db
+            .fetch_header_and_accumulated_data(their_header.height())
+            .await
+            .optional()?
+        {
+            Some(h) => ChainHeader {
+                header: h.0,
+                accumulated_data: h.1,
+            },
+            None => self.db.fetch_tip_header().await?,
         };
 
         debug!(
             target: LOG_TARGET,
-            "Comparing PoW on remote header #{} and local header #{}", their_header.height(), our_header.height()
+            "Comparing PoW on remote header #{} and local header #{}",
+            their_header.height(),
+            our_header.height()
         );
 
         match self

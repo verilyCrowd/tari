@@ -81,9 +81,9 @@ fn _genesis_template(
 {
     unimplemented!()
     // let header = BlockHeader::new(consensus_constants.blockchain_version());
-    // let (utxo, kernel, output) = create_coinbase(factories, coinbase_value, consensus_constants.coinbase_lock_height());
-    // let block = NewBlockTemplate::from(header.into_builder().with_coinbase_utxo(utxo, kernel).build());
-    // (block, output)
+    // let (utxo, kernel, output) = create_coinbase(factories, coinbase_value,
+    // consensus_constants.coinbase_lock_height()); let block =
+    // NewBlockTemplate::from(header.into_builder().with_coinbase_utxo(utxo, kernel).build()); (block, output)
 }
 
 // This is a helper function to generate and print out a block that can be used as the genesis block.

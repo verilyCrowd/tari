@@ -24,10 +24,11 @@ use super::error::BlockSyncError;
 use crate::{
     base_node::sync::{hooks::Hooks, rpc},
     blocks::Block,
-    chain_storage::{async_db::AsyncBlockchainDb, BlockchainBackend, MetadataKey, MetadataValue},
+    chain_storage::{async_db::AsyncBlockchainDb, BlockchainBackend, ChainBlock, MetadataKey, MetadataValue},
     proto::base_node::SyncBlocksRequest,
     tari_utilities::{hex::Hex, Hashable},
     transactions::aggregated_body::AggregateBody,
+    validation::CandidateBlockBodyValidation,
 };
 use futures::StreamExt;
 use log::*;
@@ -42,8 +43,6 @@ use tari_comms::{
     PeerConnection,
 };
 use tokio::task;
-use crate::chain_storage::ChainBlock;
-use crate::validation::{CandidateBlockBodyValidation};
 
 const LOG_TARGET: &str = "c::bn::block_sync";
 
@@ -137,10 +136,7 @@ impl<B: BlockchainBackend + 'static> BlockSynchronizer<B> {
         let tip_hash = tip_header.hash();
         let tip_height = tip_header.height;
         let best_height = local_metadata.height_of_longest_chain();
-        let (best_block, accumulated_data) = self
-            .db
-            .fetch_header_and_accumulated_data(best_height)
-            .await?;
+        let (best_block, accumulated_data) = self.db.fetch_header_and_accumulated_data(best_height).await?;
 
         let best_full_block_hash = accumulated_data.hash;
         debug!(
@@ -198,7 +194,10 @@ impl<B: BlockchainBackend + 'static> BlockSynchronizer<B> {
             );
 
             let timer = Instant::now();
-            let block = Arc::new(ChainBlock{ accumulated_data: header.accumulated_data.clone(),  block: Block::new(header.header,body) });
+            let block = Arc::new(ChainBlock {
+                accumulated_data: header.accumulated_data.clone(),
+                block: Block::new(header.header, body),
+            });
             self.validate_block(block.clone()).await?;
 
             debug!(

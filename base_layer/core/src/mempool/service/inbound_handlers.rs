@@ -165,14 +165,23 @@ impl MempoolInboundHandlers {
                 }
             },
             ValidBlockAdded(_, BlockAddResult::ChainReorg(removed_blocks, added_blocks), broadcast) => {
-                async_mempool::process_reorg(self.mempool.clone(), removed_blocks.into_iter().map(|b| b.block.clone().into()).collect(), added_blocks.into_iter().map(|b| b.block.clone().into()).collect())
-                    .await?;
+                async_mempool::process_reorg(
+                    self.mempool.clone(),
+                    removed_blocks.into_iter().map(|b| b.block.clone().into()).collect(),
+                    added_blocks.into_iter().map(|b| b.block.clone().into()).collect(),
+                )
+                .await?;
                 if broadcast.is_true() {
                     let _ = self.event_publisher.send(MempoolStateEvent::Updated);
                 }
             },
             BlockSyncRewind(removed_blocks) if !removed_blocks.is_empty() => {
-                async_mempool::process_reorg(self.mempool.clone(), removed_blocks.into_iter().map(|b| b.block.clone().into()).collect(), vec![]).await?;
+                async_mempool::process_reorg(
+                    self.mempool.clone(),
+                    removed_blocks.into_iter().map(|b| b.block.clone().into()).collect(),
+                    vec![],
+                )
+                .await?;
                 let _ = self.event_publisher.send(MempoolStateEvent::Updated);
             },
             BlockSyncComplete(tip_block) => {

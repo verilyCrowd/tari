@@ -22,6 +22,7 @@
 
 use crate::{
     blocks::Block,
+    chain_storage::ChainBlock,
     mempool::{
         error::MempoolError,
         reorg_pool::ReorgPool,
@@ -32,13 +33,11 @@ use crate::{
         TxStorageResponse,
     },
     transactions::{transaction::Transaction, types::Signature},
-    validation::{ValidationError, },
+    validation::{MempoolTransactionValidation, ValidationError},
 };
 use log::*;
 use std::sync::Arc;
 use tari_crypto::tari_utilities::{hex::Hex, Hashable};
-use crate::chain_storage::ChainBlock;
-use crate::validation::MempoolTransactionValidation;
 
 pub const LOG_TARGET: &str = "c::mp::mempool";
 
@@ -48,7 +47,7 @@ pub const LOG_TARGET: &str = "c::mp::mempool";
 pub struct MempoolStorage {
     unconfirmed_pool: UnconfirmedPool,
     reorg_pool: ReorgPool,
-        validator: Arc<Box<dyn MempoolTransactionValidation>>,
+    validator: Arc<Box<dyn MempoolTransactionValidation>>,
 }
 
 impl MempoolStorage {

@@ -46,10 +46,10 @@ use tari_core::{
     transactions::types::CryptoFactories,
     validation::{
         block_validators::{FullConsensusValidator, OrphanBlockValidator},
+        header_validator::HeaderValidator,
         mocks::MockValidator,
     },
 };
-use tari_core::validation::header_validator::HeaderValidator;
 
 pub const LOG_TARGET: &str = "base_node::app";
 
@@ -134,8 +134,11 @@ async fn do_recovery<D: BlockchainBackend + 'static>(
 {
     // We dont care about the values, here, so we just use mock validators, and a mainnet CM.
     let rules = ConsensusManagerBuilder::new(NetworkType::LocalNet).build();
-    let validators = Validators::new(MockValidator::new(true),
-                                     MockValidator::new(true), MockValidator::new(true));
+    let validators = Validators::new(
+        MockValidator::new(true),
+        MockValidator::new(true),
+        MockValidator::new(true),
+    );
     let temp_db_backend =
         BlockchainDatabase::new(temp_db, &rules, validators, BlockchainDatabaseConfig::default(), false)?;
     let max_height = temp_db_backend

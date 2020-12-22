@@ -30,7 +30,7 @@ use crate::{
         OutboundNodeCommsInterface,
     },
     blocks::{block_header::BlockHeader, Block, NewBlock, NewBlockTemplate},
-    chain_storage::{async_db::AsyncBlockchainDb, BlockAddResult, BlockchainBackend},
+    chain_storage::{async_db::AsyncBlockchainDb, BlockAddResult, BlockchainBackend, ChainBlock},
     consensus::ConsensusManager,
     mempool::{async_mempool, Mempool},
     proof_of_work::{Difficulty, PowAlgorithm},
@@ -46,7 +46,6 @@ use strum_macros::Display;
 use tari_comms::peer_manager::NodeId;
 use tari_crypto::tari_utilities::{hash::Hashable, hex::Hex};
 use tokio::sync::Semaphore;
-use crate::chain_storage::ChainBlock;
 
 const LOG_TARGET: &str = "c::bn::comms_interface::inbound_handler";
 const MAX_HEADERS_PER_RESPONSE: u32 = 100;
@@ -377,9 +376,6 @@ where T: BlockchainBackend + 'static
             NodeCommsRequest::GetNewBlockTemplate(pow_algo) => {
                 let best_block_header = self.blockchain_db.fetch_tip_header().await?;
 
-                // let accum_data =
-                // self.blockchain_db.fetch_header_accumulated_data(best_block_header.hash()).await?.ok_or_else(||
-                // CommsInterfaceError::InternalError("Could not find accumulated data for tip".to_string()))?;
                 let mut header = BlockHeader::from_previous(&best_block_header.header)?;
                 let constants = self.consensus_manager.consensus_constants(header.height);
                 header.version = constants.blockchain_version();
@@ -407,18 +403,6 @@ where T: BlockchainBackend + 'static
                 Ok(NodeCommsResponse::NewBlockTemplate(block_template))
             },
             NodeCommsRequest::GetNewBlock(block_template) => {
-                // let metadata = self.blockchain_db.get_chain_metadata().await?;
-                // if Some(&block_template.header.prev_hash) != metadata.best_block.as_ref() {
-                //     return Ok(NodeCommsResponse::NewBlock {
-                //         success: false,
-                //         error: Some(
-                //             "Cannot calculate MMR roots for this block as it is no longer at the tip of this node"
-                //                 .to_string(),
-                //         ),
-                //         block: None,
-                //     });
-                // }
-
                 let block = self.blockchain_db.prepare_block_merkle_roots(block_template).await?;
                 Ok(NodeCommsResponse::NewBlock {
                     success: true,

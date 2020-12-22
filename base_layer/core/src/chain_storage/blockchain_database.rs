@@ -30,6 +30,7 @@ use crate::{
         },
         db_transaction::{DbKey, DbTransaction, DbValue, MetadataKey, MetadataValue, MmrTree},
         error::ChainStorageError,
+        BlockchainBackend,
         ChainBlock,
         ChainHeader,
         HistoricalBlock,
@@ -44,7 +45,7 @@ use crate::{
         transaction::{TransactionInput, TransactionKernel, TransactionOutput},
         types::{Commitment, HashDigest, HashOutput, Signature},
     },
-    validation::{HeaderValidation, ValidationError},
+    validation::{CandidateBlockBodyValidation, HeaderValidation, OrphanValidation, ValidationError},
 };
 use croaring::Bitmap;
 use digest::Input;
@@ -62,8 +63,6 @@ use tari_common_types::{chain_metadata::ChainMetadata, types::BlockHash};
 use tari_crypto::tari_utilities::{hex::Hex, Hashable};
 use tari_mmr::{Hash, MerkleMountainRange, MutableMmr};
 use uint::static_assertions::_core::ops::RangeBounds;
-use crate::chain_storage::BlockchainBackend;
-use crate::validation::{OrphanValidation, CandidateBlockBodyValidation};
 
 const LOG_TARGET: &str = "c::cs::database";
 
@@ -107,7 +106,12 @@ pub struct Validators<B> {
 }
 
 impl<B: BlockchainBackend> Validators<B> {
-    pub fn new(block: impl CandidateBlockBodyValidation<B> + 'static, header: impl HeaderValidation<B> +'static, orphan: impl OrphanValidation + 'static) -> Self {
+    pub fn new(
+        block: impl CandidateBlockBodyValidation<B> + 'static,
+        header: impl HeaderValidation<B> + 'static,
+        orphan: impl OrphanValidation + 'static,
+    ) -> Self
+    {
         Self {
             block: Arc::new(Box::new(block)),
             header: Arc::new(Box::new(header)),
@@ -125,7 +129,6 @@ impl<B> Clone for Validators<B> {
         }
     }
 }
-
 
 // Private macro that pulls out all the boiler plate of extracting a DB query result from its variants
 macro_rules! fetch {
@@ -374,11 +377,14 @@ where B: BlockchainBackend
     }
 
     /// Returns the block header at the given block height.
-    pub fn fetch_header_and_accumulated_data(&self, height: u64) -> Result<(BlockHeader, BlockHeaderAccumulatedData), ChainStorageError> {
+    pub fn fetch_header_and_accumulated_data(
+        &self,
+        height: u64,
+    ) -> Result<(BlockHeader, BlockHeaderAccumulatedData), ChainStorageError>
+    {
         let db = self.db_read_access()?;
         db.fetch_header_and_accumulated_data(height)
     }
-
 
     /// Find the first matching header in a list of block hashes, returning the index of the match and the BlockHeader.
     /// Or None if not found.
@@ -493,23 +499,26 @@ where B: BlockchainBackend
         fetch_header_by_block_hash(&*db, hash)
     }
 
-
     /// Returns a connected header in the main chain by block hahs
     pub fn fetch_chain_header_by_block_hash(&self, hash: HashOutput) -> Result<Option<ChainHeader>, ChainStorageError> {
         let db = self.db_read_access()?;
 
-        if let Some(header) = fetch_header_by_block_hash(&*db, hash.clone())?{
-            let accumulated_data = db.fetch_header_accumulated_data(&hash)?.ok_or_else(|| ChainStorageError::ValueNotFound {
-                entity: "BlockHeaderAccumulatedData".to_string(),
-                field: "hash".to_string(),
-                value: hash.to_hex()
-            })?;
-          Ok(Some(ChainHeader{ header, accumulated_data}))
-        } else{
+        if let Some(header) = fetch_header_by_block_hash(&*db, hash.clone())? {
+            let accumulated_data =
+                db.fetch_header_accumulated_data(&hash)?
+                    .ok_or_else(|| ChainStorageError::ValueNotFound {
+                        entity: "BlockHeaderAccumulatedData".to_string(),
+                        field: "hash".to_string(),
+                        value: hash.to_hex(),
+                    })?;
+            Ok(Some(ChainHeader {
+                header,
+                accumulated_data,
+            }))
+        } else {
             Ok(None)
         }
     }
-
 
     /// Returns the header at the tip
     pub fn fetch_tip_header(&self) -> Result<ChainHeader, ChainStorageError> {
@@ -587,7 +596,7 @@ where B: BlockchainBackend
     ) -> Result<TargetDifficultyWindow, ChainStorageError>
     {
         let db = self.db_read_access()?;
- fetch_target_difficulty(&*db, &self.consensus_manager, pow_algo, height)
+        fetch_target_difficulty(&*db, &self.consensus_manager, pow_algo, height)
     }
 
     pub fn fetch_target_difficulties(&self, start_hash: HashOutput) -> Result<TargetDifficulties, ChainStorageError> {
@@ -1296,12 +1305,13 @@ fn store_pruning_horizon<T: BlockchainBackend>(db: &mut T, pruning_horizon: u64)
     db.write(txn)
 }
 
-pub fn fetch_target_difficulty<T: BlockchainBackend> (
+pub fn fetch_target_difficulty<T: BlockchainBackend>(
     db: &T,
     consensus_manager: &ConsensusManager,
     pow_algo: PowAlgorithm,
     height: u64,
-) -> Result<TargetDifficultyWindow, ChainStorageError> {
+) -> Result<TargetDifficultyWindow, ChainStorageError>
+{
     let mut target_difficulties = consensus_manager.new_target_difficulty(pow_algo, height);
     for height in (0..height).rev() {
         // TODO: this can be optimized by retrieving the accumulated data and header at the same time, or even
@@ -1309,13 +1319,13 @@ pub fn fetch_target_difficulty<T: BlockchainBackend> (
         let header = fetch_header(&*db, height)?;
 
         if header.pow.pow_algo == pow_algo {
-            let accum_data = db.fetch_header_accumulated_data(&header.hash())?.ok_or_else(|| {
-                ChainStorageError::ValueNotFound {
-                    entity: "BlockHeaderAccumulatedData".to_string(),
-                    field: "hash".to_string(),
-                    value: header.hash().to_hex(),
-                }
-            })?;
+            let accum_data =
+                db.fetch_header_accumulated_data(&header.hash())?
+                    .ok_or_else(|| ChainStorageError::ValueNotFound {
+                        entity: "BlockHeaderAccumulatedData".to_string(),
+                        field: "hash".to_string(),
+                        value: header.hash().to_hex(),
+                    })?;
 
             target_difficulties.add_front(header.timestamp(), accum_data.target_difficulty);
             if target_difficulties.is_full() {
@@ -1700,10 +1710,7 @@ fn handle_possible_reorg<T: BlockchainBackend>(
             num_removed_blocks,
             num_added_blocks,
         );
-        Ok(BlockAddResult::ChainReorg(
-            removed_blocks,
-            reorg_chain.into(),
-        ))
+        Ok(BlockAddResult::ChainReorg(removed_blocks, reorg_chain.into()))
     } else {
         trace!(
             target: LOG_TARGET,
@@ -1813,16 +1820,20 @@ fn insert_orphan_and_find_new_tips<T: BlockchainBackend>(
 
     let mut new_tips_found = vec![];
     let mut parent;
-    if let Some(curr_parent) = db.fetch_orphan_chain_tip_by_hash(&block.hash())?
-    {
+    if let Some(curr_parent) = db.fetch_orphan_chain_tip_by_hash(&block.hash())? {
         parent = curr_parent;
         txn.remove_orphan_chain_tip(block.header.prev_hash.clone());
-        debug!(target: LOG_TARGET, "New orphan extends a chain in the current candidate tip set");
-
+        debug!(
+            target: LOG_TARGET,
+            "New orphan extends a chain in the current candidate tip set"
+        );
     } else {
         let best_chain_connection = db.fetch_chain_header_in_all_chains(&block.header.prev_hash.clone())?;
-        if let Some(curr_parent ) = best_chain_connection {
-            debug!(target: LOG_TARGET, "New orphan does not have a parent in the current tip set");
+        if let Some(curr_parent) = best_chain_connection {
+            debug!(
+                target: LOG_TARGET,
+                "New orphan does not have a parent in the current tip set"
+            );
             parent = curr_parent;
         } else {
             debug!(
@@ -1837,29 +1848,28 @@ fn insert_orphan_and_find_new_tips<T: BlockchainBackend>(
         }
     }
 
-        let accum_builder = validator.validate(db, &block.header, &parent.header, &parent.accumulated_data)?;
-        let accumulated_data = accum_builder
-            .total_kernel_offset(
-                &parent.accumulated_data.total_kernel_offset,
-                &block.header.total_kernel_offset,
-            )
-            .build()?;
+    let accum_builder = validator.validate(db, &block.header, &parent.header, &parent.accumulated_data)?;
+    let accumulated_data = accum_builder
+        .total_kernel_offset(
+            &parent.accumulated_data.total_kernel_offset,
+            &block.header.total_kernel_offset,
+        )
+        .build()?;
 
-        // Extend tip
+    // Extend tip
 
-
-        txn.insert_chained_orphan(
-            ChainBlock {
-                accumulated_data: accumulated_data.clone(),
-                block: block.as_ref().clone(),
-            }
-            .into(),
-        );
-
-        for new_tip in find_orphan_descendant_tips_of(&*db, &block.header, &accumulated_data, validator, &mut txn)? {
-            txn.insert_orphan_chain_tip(new_tip.accumulated_data.hash.clone());
-            new_tips_found.push(new_tip);
+    txn.insert_chained_orphan(
+        ChainBlock {
+            accumulated_data: accumulated_data.clone(),
+            block: block.as_ref().clone(),
         }
+        .into(),
+    );
+
+    for new_tip in find_orphan_descendant_tips_of(&*db, &block.header, &accumulated_data, validator, &mut txn)? {
+        txn.insert_orphan_chain_tip(new_tip.accumulated_data.hash.clone());
+        new_tips_found.push(new_tip);
+    }
 
     db.write(txn)?;
     Ok(new_tips_found)
@@ -1876,9 +1886,9 @@ fn find_orphan_descendant_tips_of<T: BlockchainBackend>(
 {
     let children = db.fetch_orphan_children_of(prev_accumulated_data.hash.clone())?;
     if children.is_empty() {
-        return Ok(vec![ChainHeader{
+        return Ok(vec![ChainHeader {
             header: prev_header.clone(),
-            accumulated_data: prev_accumulated_data.clone()
+            accumulated_data: prev_accumulated_data.clone(),
         }]);
     }
     let mut res = vec![];
@@ -1917,7 +1927,6 @@ fn find_orphan_descendant_tips_of<T: BlockchainBackend>(
                 txn.delete_orphan(child.hash());
             },
         };
-
     }
     Ok(res)
 }

@@ -20,14 +20,15 @@
 // WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 // USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use crate::{chain_storage::BlockchainBackend, validation::error::ValidationError};
+use crate::{
+    blocks::{Block, BlockHeader},
+    chain_storage::{BlockHeaderAccumulatedData, BlockHeaderAccumulatedDataBuilder, BlockchainBackend, ChainBlock},
+    validation::{error::ValidationError, CandidateBlockBodyValidation, HeaderValidation, OrphanValidation},
+};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use crate::validation::{HeaderValidation, OrphanValidation, CandidateBlockBodyValidation};
-use crate::chain_storage::{BlockHeaderAccumulatedData, BlockHeaderAccumulatedDataBuilder, ChainBlock};
-use crate::blocks::{BlockHeader, Block};
 
 #[derive(Clone)]
 pub struct MockValidator {
@@ -78,8 +79,15 @@ impl OrphanValidation for MockValidator {
     }
 }
 
-impl<B:BlockchainBackend> HeaderValidation<B> for MockValidator {
-    fn validate(&self, _db: &B, _header: &BlockHeader, _previous_header: &BlockHeader, _previous_data: &BlockHeaderAccumulatedData) -> Result<BlockHeaderAccumulatedDataBuilder, ValidationError> {
+impl<B: BlockchainBackend> HeaderValidation<B> for MockValidator {
+    fn validate(
+        &self,
+        _db: &B,
+        _header: &BlockHeader,
+        _previous_header: &BlockHeader,
+        _previous_data: &BlockHeaderAccumulatedData,
+    ) -> Result<BlockHeaderAccumulatedDataBuilder, ValidationError>
+    {
         if self.is_valid.load(Ordering::SeqCst) {
             Ok(BlockHeaderAccumulatedDataBuilder::default())
         } else {
@@ -88,7 +96,8 @@ impl<B:BlockchainBackend> HeaderValidation<B> for MockValidator {
             ))
         }
     }
-    // fn validate(&self, header: &BlockHeader, previous_header: &BlockHeader, previous_data: &BlockHeaderAccumulatedData) -> Result<BlockHeaderAccumulatedDataBuilder, ValidationError> {
+    // fn validate(&self, header: &BlockHeader, previous_header: &BlockHeader, previous_data:
+    // &BlockHeaderAccumulatedData) -> Result<BlockHeaderAccumulatedDataBuilder, ValidationError> {
     //     unimplemented!()
     // }
 }
