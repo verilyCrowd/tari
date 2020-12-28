@@ -27,18 +27,18 @@ use tari_common_types::chain_metadata::ChainMetadata;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InProgressHorizonSyncState {
     pub metadata: ChainMetadata,
-    pub initial_kernel_checkpoint_count: u64,
-    pub initial_utxo_checkpoint_count: u64,
-    pub initial_rangeproof_checkpoint_count: u64,
+    /* pub initial_kernel_checkpoint_count: u64,
+     * pub initial_utxo_checkpoint_count: u64,
+     * pub initial_rangeproof_checkpoint_count: u64, */
 }
 
 impl InProgressHorizonSyncState {
     pub fn new_with_metadata(metadata: ChainMetadata) -> Self {
         Self {
             metadata,
-            initial_kernel_checkpoint_count: 0,
-            initial_utxo_checkpoint_count: 0,
-            initial_rangeproof_checkpoint_count: 0,
+            /* initial_kernel_checkpoint_count: 0,
+             * initial_utxo_checkpoint_count: 0,
+             * initial_rangeproof_checkpoint_count: 0, */
         }
     }
 }
@@ -47,11 +47,12 @@ impl Display for InProgressHorizonSyncState {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
         write!(
             f,
-            "metadata = {}, #kernel checkpoints = ({}), #UTXO checkpoints = ({}), #range proof checkpoints = ({})",
+            "metadata = {}",
+            // , #kernel checkpoints = ({}), #UTXO checkpoints = ({}), #range proof checkpoints = ({})",
             self.metadata,
-            self.initial_kernel_checkpoint_count,
-            self.initial_utxo_checkpoint_count,
-            self.initial_rangeproof_checkpoint_count,
+            /* self.initial_kernel_checkpoint_count,
+             * self.initial_utxo_checkpoint_count,
+             * self.initial_rangeproof_checkpoint_count, */
         )
     }
 }

@@ -106,6 +106,7 @@ pub struct BlockHeader {
     pub nonce: u64,
     /// Proof of work summary
     pub pow: ProofOfWork,
+    pub kernel_mmr_size: u32
 }
 
 impl BlockHeader {
@@ -122,6 +123,7 @@ impl BlockHeader {
             total_kernel_offset: BlindingFactor::default(),
             nonce: 0,
             pow: ProofOfWork::default(),
+            kernel_mmr_size: 0
         }
     }
 
@@ -142,6 +144,7 @@ impl BlockHeader {
             total_kernel_offset: BlindingFactor::default(),
             nonce: 0,
             pow: ProofOfWork::default(),
+            kernel_mmr_size: 0
         })
     }
 
@@ -192,6 +195,7 @@ impl BlockHeader {
             .chain(self.total_kernel_offset.as_bytes())
             .result()
             .to_vec()
+        // TODO: Put kernel MMR size into this. Requires testnet reset
     }
 
     #[inline]
@@ -218,6 +222,7 @@ impl From<NewBlockHeaderTemplate> for BlockHeader {
             total_kernel_offset: header_template.total_kernel_offset,
             nonce: 0,
             pow: header_template.pow,
+            kernel_mmr_size: 0
         }
     }
 }
@@ -237,6 +242,8 @@ impl Hashable for BlockHeader {
             .chain(self.pow.to_bytes())
             .result()
             .to_vec()
+
+        // TODO: include kernel MMR size in here. Requires reset.
     }
 }
 
@@ -271,7 +278,8 @@ impl Display for BlockHeader {
             self.total_kernel_offset.to_hex(),
             self.nonce,
             self.pow
-        ))
+        ))?;
+        fmt.write_str(&format!("Kernel MMR size:{}", self.kernel_mmr_size))
     }
 }
 

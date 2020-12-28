@@ -919,50 +919,50 @@ where B: BlockchainBackend
     /// Prepares the database for horizon sync. This function sets the PendingHorizonSyncState for the database
     /// and sets the chain metadata to indicate that this node can not provide any sync data until sync is complete.
     pub fn horizon_sync_begin(&self) -> Result<InProgressHorizonSyncState, ChainStorageError> {
-        unimplemented!()
-        // let db = self.db_write_access()?;
-        // match get_horizon_sync_state(&*db)? {
-        //     Some(state) => {
-        //         info!(
-        //             target: LOG_TARGET,
-        //             "Previous horizon sync was interrupted. Attempting to recover."
-        //         );
-        //         debug!(target: LOG_TARGET, "Existing PendingHorizonSyncState = ({})", state);
-        //         Ok(state)
-        //     },
-        //     None => {
-        //         unimplemented!();
-        // let metadata = db.fetch_chain_metadata()?;
-        //
-        // let state = InProgressHorizonSyncState {
-        //     metadata,
-        //     initial_kernel_checkpoint_count: db.count_checkpoints(MmrTree::Kernel)? as u64,
-        //     initial_utxo_checkpoint_count: db.count_checkpoints(MmrTree::Utxo)? as u64,
-        //     initial_rangeproof_checkpoint_count: db.count_checkpoints(MmrTree::Utxo)? as u64,
-        // };
-        // debug!(target: LOG_TARGET, "Preparing database for horizon sync. ({})", state);
-        //
-        // let mut txn = DbTransaction::new();
-        //
-        // txn.set_metadata(
-        //     MetadataKey::HorizonSyncState,
-        //     MetadataValue::HorizonSyncState(state.clone()),
-        // );
-        //
-        // // During horizon state syncing the blockchain backend will be in an inconsistent state until the
-        // entire // horizon state has been synced. Reset the local chain metadata will limit
-        // other nodes and // local service from requesting data while the horizon sync is in
-        // progress. txn.set_metadata(MetadataKey::ChainHeight,
-        // MetadataValue::ChainHeight(Some(0))); txn.set_metadata(
-        //     MetadataKey::EffectivePrunedHeight,
-        //     MetadataValue::EffectivePrunedHeight(0),
-        // );
-        // txn.set_metadata(MetadataKey::AccumulatedWork, MetadataValue::AccumulatedWork(None));
-        // commit(&mut *db, txn)?;
-        //
-        // Ok(state)
-        // },
-        // }
+        let mut db = self.db_write_access()?;
+        match get_horizon_sync_state(&*db)? {
+            Some(state) => {
+                info!(
+                    target: LOG_TARGET,
+                    "Previous horizon sync was interrupted. Attempting to recover."
+                );
+                debug!(target: LOG_TARGET, "Existing PendingHorizonSyncState = ({})", state);
+                Ok(state)
+            },
+            None => {
+                let metadata = db.fetch_chain_metadata()?;
+
+                let state = InProgressHorizonSyncState {
+                    metadata,
+                    /* initial_kernel_checkpoint_count: db.count_checkpoints(MmrTree::Kernel)? as u64,
+                     * initial_utxo_checkpoint_count: db.count_checkpoints(MmrTree::Utxo)? as u64,
+                     * initial_rangeproof_checkpoint_count: db.count_checkpoints(MmrTree::Utxo)? as u64, */
+                };
+                debug!(target: LOG_TARGET, "Preparing database for horizon sync. ({})", state);
+
+                let mut txn = DbTransaction::new();
+
+                txn.set_metadata(
+                    MetadataKey::HorizonSyncState,
+                    MetadataValue::HorizonSyncState(state.clone()),
+                );
+
+                // During horizon state syncing the blockchain backend will be in an inconsistent state until the
+                // entire horizon state has been synced. Reset the local chain metadata will limit
+                //  other nodes and local service from requesting data while the horizon sync is in
+                // progress
+                // TODO: This probably isn't necessary anymore
+                //         txn.set_metadata(MetadataKey::ChainHeight,
+                // MetadataValue::ChainHeight(0)); txn.set_metadata(
+                //     MetadataKey::EffectivePrunedHeight,
+                //     MetadataValue::EffectivePrunedHeight(0),
+                // );
+                // txn.set_metadata(MetadataKey::AccumulatedWork, MetadataValue::AccumulatedWork(None)
+                db.write(txn)?;
+
+                Ok(state)
+            },
+        }
     }
 
     /// Commit the current synced horizon state.

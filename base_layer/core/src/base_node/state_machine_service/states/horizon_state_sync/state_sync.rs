@@ -39,13 +39,15 @@ use crate::{
 use croaring::Bitmap;
 use log::*;
 use tari_common_types::chain_metadata::ChainMetadata;
+use tari_comms::PeerConnection;
 use tari_crypto::tari_utilities::Hashable;
+use crate::chain_storage::ChainStorageError;
 
 const LOG_TARGET: &str = "c::bn::state_machine_service::states::horizon_state_sync";
 
 pub struct HorizonStateSynchronization<'a, B: BlockchainBackend> {
     shared: &'a mut BaseNodeStateMachine<B>,
-    sync_peers: &'a mut SyncPeers,
+    sync_peer: &'a PeerConnection,
     local_metadata: &'a ChainMetadata,
     horizon_sync_height: u64,
 }
@@ -53,14 +55,14 @@ pub struct HorizonStateSynchronization<'a, B: BlockchainBackend> {
 impl<'a, B: BlockchainBackend + 'static> HorizonStateSynchronization<'a, B> {
     pub fn new(
         shared: &'a mut BaseNodeStateMachine<B>,
-        sync_peers: &'a mut SyncPeers,
+        sync_peer: &'a PeerConnection,
         local_metadata: &'a ChainMetadata,
         horizon_sync_height: u64,
     ) -> Self
     {
         Self {
             shared,
-            sync_peers,
+            sync_peer,
             local_metadata,
             horizon_sync_height,
         }
@@ -106,15 +108,14 @@ impl<'a, B: BlockchainBackend + 'static> HorizonStateSynchronization<'a, B> {
             .fetch_mmr_node_count(MmrTree::Kernel, self.horizon_sync_height)
             .await?;
 
-        let (remote_num_kernels, sync_peer) = helpers::request_mmr_node_count(
-            LOG_TARGET,
-            self.shared,
-            self.sync_peers,
-            MmrTree::Kernel,
-            self.horizon_sync_height,
-            config.max_sync_request_retry_attempts,
-        )
-        .await?;
+        let header= self.db().fetch_header(self.horizon_sync_height).await?.ok_or_else(||
+        ChainStorageError::ValueNotFound {
+            entity: "Header".to_string(),
+            field: "height".to_string(),
+            value: self.horizon_sync_height.to_string()
+        })?;
+
+       let remote_num_kernels = header.kernel_mmr_size;
 
         if local_num_kernels >= remote_num_kernels {
             debug!(target: LOG_TARGET, "Local kernel set already synchronized");
@@ -177,9 +178,9 @@ impl<'a, B: BlockchainBackend + 'static> HorizonStateSynchronization<'a, B> {
                         if sync_peer1 == sync_peer2 {
                             debug!(
                                 target: LOG_TARGET,
-                                "Banning peer {} from local node, because they supplied invalid kernels", sync_peer
+                                "Banning peer {} from local node, because they supplied invalid kernels", self.sync_peer
                             );
-                            self.ban_sync_peer(&sync_peer, "Peer supplied invalid kernels".to_string())
+                            self.ban_sync_peer(&self.sync_peer, "Peer supplied invalid kernels".to_string())
                                 .await?;
                         }
                     },
@@ -219,257 +220,260 @@ impl<'a, B: BlockchainBackend + 'static> HorizonStateSynchronization<'a, B> {
     }
 
     async fn ban_sync_peer(&mut self, sync_peer: &SyncPeer, reason: String) -> Result<(), HorizonSyncError> {
-        helpers::ban_sync_peer(
-            LOG_TARGET,
-            &mut self.shared.connectivity,
-            self.sync_peers,
-            sync_peer,
-            self.shared.config.sync_peer_config.short_term_peer_ban_duration,
-            reason,
-        )
-        .await?;
-        Ok(())
+        // helpers::ban_sync_peer(
+        //     LOG_TARGET,
+        //     &mut self.shared.connectivity,
+        //     self.sync_peers,
+        //     sync_peer,
+        //     self.shared.config.sync_peer_config.short_term_peer_ban_duration,
+        //     reason,
+        // )
+        // .await?;
+        // Ok(())
+        unimplemented!("ban_sync_peer")
     }
 
     // Checks if any existing UTXOs in the local database have been spent according to the remote state
     async fn check_state_of_current_utxos(&mut self) -> Result<(), HorizonSyncError> {
-        let config = self.shared.config.horizon_sync_config;
-        let local_tip_height = self.local_metadata.height_of_longest_chain();
-        let local_num_utxo_nodes = self.db().fetch_mmr_node_count(MmrTree::Utxo, local_tip_height).await?;
+        // let config = self.shared.config.horizon_sync_config;
+        // let local_tip_height = self.local_metadata.height_of_longest_chain();
+        // let local_num_utxo_nodes = self.db().fetch_mmr_node_count(MmrTree::Utxo, local_tip_height).await?;
+        //
+        // debug!(
+        //     target: LOG_TARGET,
+        //     "Checking current utxo state between {} and {}", 0, local_num_utxo_nodes
+        // );
+        //
+        // let chunks = self.chunked_count_iter(0, local_num_utxo_nodes, config.max_utxo_mmr_node_request_size);
+        // for (pos, count) in chunks {
+        //     let num_sync_peers = self.sync_peers.len();
+        //     for attempt in 1..=num_sync_peers {
+        //         let (remote_utxo_hashes, remote_utxo_deleted, sync_peer) = helpers::request_mmr_nodes(
+        //             LOG_TARGET,
+        //             self.shared,
+        //             self.sync_peers,
+        //             MmrTree::Utxo,
+        //             pos,
+        //             count,
+        //             self.horizon_sync_height,
+        //             config.max_sync_request_retry_attempts,
+        //         )
+        //         .await?;
+        //         let (local_utxo_hashes, local_utxo_bitmap_bytes) = self
+        //             .shared
+        //             .local_node_interface
+        //             .fetch_mmr_nodes(MmrTree::Utxo, pos, count, self.horizon_sync_height)
+        //             .await?;
+        //         let local_utxo_deleted = Bitmap::deserialize(&local_utxo_bitmap_bytes);
+        //
+        //         match self.validate_utxo_hashes_response(&remote_utxo_hashes, &local_utxo_hashes) {
+        //             Ok(_) => {
+        //                 let num_hashes = local_utxo_hashes.len();
+        //                 let spent_utxos = local_utxo_hashes
+        //                     .into_iter()
+        //                     .enumerate()
+        //                     .filter_map(|(index, hash)| {
+        //                         let deleted_index = pos + index as u32;
+        //                         let local_deleted = local_utxo_deleted.contains(deleted_index);
+        //                         let remote_deleted = remote_utxo_deleted.contains(deleted_index);
+        //                         if remote_deleted && !local_deleted {
+        //                             Some(hash)
+        //                         } else {
+        //                             None
+        //                         }
+        //                     })
+        //                     .collect::<Vec<_>>();
+        //
+        //                 let num_deleted = spent_utxos.len();
+        //                 self.db().horizon_sync_spend_utxos(spent_utxos).await?;
+        //
+        //                 debug!(
+        //                     target: LOG_TARGET,
+        //                     "Checked {} existing UTXO(s). Marked {} UTXO(s) as spent.", num_hashes, num_deleted
+        //                 );
+        //
+        //                 break;
+        //             },
+        //             Err(err @ HorizonSyncError::IncorrectResponse) => {
+        //                 warn!(
+        //                     target: LOG_TARGET,
+        //                     "Invalid UTXO hashes received from peer `{}`: {}", sync_peer, err
+        //                 );
+        //                 // Exclude the peer (without banning) as they could be on the wrong chain
+        //                 exclude_sync_peer(LOG_TARGET, self.sync_peers, &sync_peer)?;
+        //             },
+        //             Err(e) => return Err(e),
+        //         };
+        //         debug!(target: LOG_TARGET, "Retrying UTXO state check. Attempt {}", attempt);
+        //         if attempt == num_sync_peers {
+        //             return Err(HorizonSyncError::MaxSyncAttemptsReached);
+        //         }
+        //     }
+        // }
 
-        debug!(
-            target: LOG_TARGET,
-            "Checking current utxo state between {} and {}", 0, local_num_utxo_nodes
-        );
-
-        let chunks = self.chunked_count_iter(0, local_num_utxo_nodes, config.max_utxo_mmr_node_request_size);
-        for (pos, count) in chunks {
-            let num_sync_peers = self.sync_peers.len();
-            for attempt in 1..=num_sync_peers {
-                let (remote_utxo_hashes, remote_utxo_deleted, sync_peer) = helpers::request_mmr_nodes(
-                    LOG_TARGET,
-                    self.shared,
-                    self.sync_peers,
-                    MmrTree::Utxo,
-                    pos,
-                    count,
-                    self.horizon_sync_height,
-                    config.max_sync_request_retry_attempts,
-                )
-                .await?;
-                let (local_utxo_hashes, local_utxo_bitmap_bytes) = self
-                    .shared
-                    .local_node_interface
-                    .fetch_mmr_nodes(MmrTree::Utxo, pos, count, self.horizon_sync_height)
-                    .await?;
-                let local_utxo_deleted = Bitmap::deserialize(&local_utxo_bitmap_bytes);
-
-                match self.validate_utxo_hashes_response(&remote_utxo_hashes, &local_utxo_hashes) {
-                    Ok(_) => {
-                        let num_hashes = local_utxo_hashes.len();
-                        let spent_utxos = local_utxo_hashes
-                            .into_iter()
-                            .enumerate()
-                            .filter_map(|(index, hash)| {
-                                let deleted_index = pos + index as u32;
-                                let local_deleted = local_utxo_deleted.contains(deleted_index);
-                                let remote_deleted = remote_utxo_deleted.contains(deleted_index);
-                                if remote_deleted && !local_deleted {
-                                    Some(hash)
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect::<Vec<_>>();
-
-                        let num_deleted = spent_utxos.len();
-                        self.db().horizon_sync_spend_utxos(spent_utxos).await?;
-
-                        debug!(
-                            target: LOG_TARGET,
-                            "Checked {} existing UTXO(s). Marked {} UTXO(s) as spent.", num_hashes, num_deleted
-                        );
-
-                        break;
-                    },
-                    Err(err @ HorizonSyncError::IncorrectResponse) => {
-                        warn!(
-                            target: LOG_TARGET,
-                            "Invalid UTXO hashes received from peer `{}`: {}", sync_peer, err
-                        );
-                        // Exclude the peer (without banning) as they could be on the wrong chain
-                        exclude_sync_peer(LOG_TARGET, self.sync_peers, &sync_peer)?;
-                    },
-                    Err(e) => return Err(e),
-                };
-                debug!(target: LOG_TARGET, "Retrying UTXO state check. Attempt {}", attempt);
-                if attempt == num_sync_peers {
-                    return Err(HorizonSyncError::MaxSyncAttemptsReached);
-                }
-            }
-        }
-
-        Ok(())
+        // Ok(())
+        unimplemented!("TODO: implement check current state of prs")
     }
 
     // Synchronize UTXO MMR Nodes, RangeProof MMR Nodes and the UTXO set upto the horizon sync height from
     // remote sync peers.
     async fn synchronize_utxos_and_rangeproofs(&mut self) -> Result<(), HorizonSyncError> {
-        let config = self.shared.config.horizon_sync_config;
-        let local_num_utxo_nodes = self
-            .db()
-            .fetch_mmr_node_count(MmrTree::Utxo, self.horizon_sync_height)
-            .await?;
-        let (remote_num_utxo_nodes, _sync_peer) = helpers::request_mmr_node_count(
-            LOG_TARGET,
-            self.shared,
-            self.sync_peers,
-            MmrTree::Utxo,
-            self.horizon_sync_height,
-            config.max_sync_request_retry_attempts,
-        )
-        .await?;
-
-        if local_num_utxo_nodes >= remote_num_utxo_nodes {
-            debug!(target: LOG_TARGET, "UTXOs and range proofs are already synchronized.");
-            return Ok(());
-        }
-
-        debug!(
-            target: LOG_TARGET,
-            "Synchronizing {} UTXO MMR nodes from {} to {}",
-            remote_num_utxo_nodes - local_num_utxo_nodes,
-            local_num_utxo_nodes,
-            remote_num_utxo_nodes
-        );
-
-        let chunks = self.chunked_count_iter(
-            local_num_utxo_nodes,
-            remote_num_utxo_nodes,
-            config.max_utxo_mmr_node_request_size,
-        );
-        for (pos, count) in chunks {
-            let num_sync_peers = self.sync_peers.len();
-            for attempt in 1..=num_sync_peers {
-                let (utxo_hashes, utxo_bitmap, sync_peer1) = helpers::request_mmr_nodes(
-                    LOG_TARGET,
-                    self.shared,
-                    self.sync_peers,
-                    MmrTree::Utxo,
-                    pos,
-                    count,
-                    self.horizon_sync_height,
-                    config.max_sync_request_retry_attempts,
-                )
-                .await?;
-                let (rp_hashes, _, sync_peer2) = helpers::request_mmr_nodes(
-                    LOG_TARGET,
-                    self.shared,
-                    self.sync_peers,
-                    MmrTree::RangeProof,
-                    pos,
-                    count,
-                    self.horizon_sync_height,
-                    config.max_sync_request_retry_attempts,
-                )
-                .await?;
-
-                // Construct the list of hashes of the UTXOs that need to be requested.
-                let mut request_utxo_hashes = Vec::new();
-                let mut request_rp_hashes = Vec::new();
-                let mut is_stxos = Vec::with_capacity(utxo_hashes.len());
-                for index in 0..utxo_hashes.len() {
-                    let deleted = utxo_bitmap.contains(pos + index as u32);
-                    is_stxos.push(deleted);
-                    if !deleted {
-                        request_utxo_hashes.push(&utxo_hashes[index]);
-                        request_rp_hashes.push(&rp_hashes[index]);
-                    }
-                }
-
-                // Download a partial UTXO set
-                let (utxos, sync_peer3) = helpers::request_txos(
-                    LOG_TARGET,
-                    self.shared,
-                    self.sync_peers,
-                    &request_utxo_hashes,
-                    config.max_sync_request_retry_attempts,
-                )
-                .await?;
-
-                debug!(
-                    target: LOG_TARGET,
-                    "Fetched {} UTXOs ({} were not downloaded because they are spent)",
-                    utxos.len(),
-                    is_stxos.iter().filter(|x| **x).count()
-                );
-
-                let db = &self.shared.db;
-                match self.validate_utxo_and_rangeproof_response(
-                    &utxo_hashes,
-                    &rp_hashes,
-                    &request_utxo_hashes,
-                    &request_rp_hashes,
-                    &utxos,
-                ) {
-                    Ok(_) => {
-                        // The order of these inserts are important to ensure the MMRs are constructed correctly
-                        // and the roots match.
-                        for (index, is_stxo) in is_stxos.into_iter().enumerate() {
-                            if is_stxo {
-                                db.insert_mmr_node(MmrTree::Utxo, utxo_hashes[index].clone(), true)
-                                    .await?;
-                                db.insert_mmr_node(MmrTree::RangeProof, rp_hashes[index].clone(), false)
-                                    .await?;
-                            } else {
-                                unimplemented!();
-                                // Inserting the UTXO will also insert the corresponding UTXO and RangeProof MMR
-                                // Nodes.
-                                // async_db::insert_utxo(db.clone(), utxos.remove(0)).await?;
-                            }
-                        }
-
-                        unimplemented!();
-                        // async_db::horizon_sync_create_mmr_checkpoint(self.db(), MmrTree::Utxo).await?;
-                        // async_db::horizon_sync_create_mmr_checkpoint(self.db(), MmrTree::RangeProof).await?;
-                        // trace!(
-                        //     target: LOG_TARGET,
-                        //     "{} UTXOs with MMR nodes inserted into database",
-                        //     utxo_hashes.len()
-                        // );
-
-                        // break;
-                    },
-                    Err(err @ HorizonSyncError::EmptyResponse { .. }) |
-                    Err(err @ HorizonSyncError::IncorrectResponse { .. }) => {
-                        warn!(
-                            target: LOG_TARGET,
-                            "Invalid UTXOs or MMR Nodes received from peer. {}", err
-                        );
-                        if (sync_peer1 == sync_peer2) && (sync_peer1 == sync_peer3) {
-                            debug!(
-                                target: LOG_TARGET,
-                                "Banning peer {} from local node, because they supplied invalid UTXOs or MMR Nodes",
-                                sync_peer1
-                            );
-
-                            self.ban_sync_peer(&sync_peer1, "Peer supplied invalid UTXOs or MMR Nodes".to_string())
-                                .await?;
-                        }
-                    },
-                    Err(e) => return Err(e),
-                };
-
-                debug!(target: LOG_TARGET, "Retrying kernel sync. Attempt {}", attempt);
-                if attempt == num_sync_peers {
-                    return Err(HorizonSyncError::MaxSyncAttemptsReached);
-                }
-            }
-        }
-
-        self.validate_mmr_root(MmrTree::Utxo).await?;
-        self.validate_mmr_root(MmrTree::RangeProof).await?;
-        Ok(())
+        // let config = self.shared.config.horizon_sync_config;
+        // let local_num_utxo_nodes = self
+        //     .db()
+        //     .fetch_mmr_node_count(MmrTree::Utxo, self.horizon_sync_height)
+        //     .await?;
+        // let (remote_num_utxo_nodes, _sync_peer) = helpers::request_mmr_node_count(
+        //     LOG_TARGET,
+        //     self.shared,
+        //     self.sync_peers,
+        //     MmrTree::Utxo,
+        //     self.horizon_sync_height,
+        //     config.max_sync_request_retry_attempts,
+        // )
+        // .await?;
+        //
+        // if local_num_utxo_nodes >= remote_num_utxo_nodes {
+        //     debug!(target: LOG_TARGET, "UTXOs and range proofs are already synchronized.");
+        //     return Ok(());
+        // }
+        //
+        // debug!(
+        //     target: LOG_TARGET,
+        //     "Synchronizing {} UTXO MMR nodes from {} to {}",
+        //     remote_num_utxo_nodes - local_num_utxo_nodes,
+        //     local_num_utxo_nodes,
+        //     remote_num_utxo_nodes
+        // );
+        //
+        // let chunks = self.chunked_count_iter(
+        //     local_num_utxo_nodes,
+        //     remote_num_utxo_nodes,
+        //     config.max_utxo_mmr_node_request_size,
+        // );
+        // for (pos, count) in chunks {
+        //     let num_sync_peers = self.sync_peers.len();
+        //     for attempt in 1..=num_sync_peers {
+        //         let (utxo_hashes, utxo_bitmap, sync_peer1) = helpers::request_mmr_nodes(
+        //             LOG_TARGET,
+        //             self.shared,
+        //             self.sync_peers,
+        //             MmrTree::Utxo,
+        //             pos,
+        //             count,
+        //             self.horizon_sync_height,
+        //             config.max_sync_request_retry_attempts,
+        //         )
+        //         .await?;
+        //         let (rp_hashes, _, sync_peer2) = helpers::request_mmr_nodes(
+        //             LOG_TARGET,
+        //             self.shared,
+        //             self.sync_peers,
+        //             MmrTree::RangeProof,
+        //             pos,
+        //             count,
+        //             self.horizon_sync_height,
+        //             config.max_sync_request_retry_attempts,
+        //         )
+        //         .await?;
+        //
+        //         // Construct the list of hashes of the UTXOs that need to be requested.
+        //         let mut request_utxo_hashes = Vec::new();
+        //         let mut request_rp_hashes = Vec::new();
+        //         let mut is_stxos = Vec::with_capacity(utxo_hashes.len());
+        //         for index in 0..utxo_hashes.len() {
+        //             let deleted = utxo_bitmap.contains(pos + index as u32);
+        //             is_stxos.push(deleted);
+        //             if !deleted {
+        //                 request_utxo_hashes.push(&utxo_hashes[index]);
+        //                 request_rp_hashes.push(&rp_hashes[index]);
+        //             }
+        //         }
+        //
+        //         // Download a partial UTXO set
+        //         let (utxos, sync_peer3) = helpers::request_txos(
+        //             LOG_TARGET,
+        //             self.shared,
+        //             self.sync_peers,
+        //             &request_utxo_hashes,
+        //             config.max_sync_request_retry_attempts,
+        //         )
+        //         .await?;
+        //
+        //         debug!(
+        //             target: LOG_TARGET,
+        //             "Fetched {} UTXOs ({} were not downloaded because they are spent)",
+        //             utxos.len(),
+        //             is_stxos.iter().filter(|x| **x).count()
+        //         );
+        //
+        //         let db = &self.shared.db;
+        //         match self.validate_utxo_and_rangeproof_response(
+        //             &utxo_hashes,
+        //             &rp_hashes,
+        //             &request_utxo_hashes,
+        //             &request_rp_hashes,
+        //             &utxos,
+        //         ) {
+        //             Ok(_) => {
+        //                 // The order of these inserts are important to ensure the MMRs are constructed correctly
+        //                 // and the roots match.
+        //                 for (index, is_stxo) in is_stxos.into_iter().enumerate() {
+        //                     if is_stxo {
+        //                         db.insert_mmr_node(MmrTree::Utxo, utxo_hashes[index].clone(), true)
+        //                             .await?;
+        //                         db.insert_mmr_node(MmrTree::RangeProof, rp_hashes[index].clone(), false)
+        //                             .await?;
+        //                     } else {
+        //                         unimplemented!();
+        //                         // Inserting the UTXO will also insert the corresponding UTXO and RangeProof MMR
+        //                         // Nodes.
+        //                         // async_db::insert_utxo(db.clone(), utxos.remove(0)).await?;
+        //                     }
+        //                 }
+        //
+        //                 unimplemented!();
+        //                 // async_db::horizon_sync_create_mmr_checkpoint(self.db(), MmrTree::Utxo).await?;
+        //                 // async_db::horizon_sync_create_mmr_checkpoint(self.db(), MmrTree::RangeProof).await?;
+        //                 // trace!(
+        //                 //     target: LOG_TARGET,
+        //                 //     "{} UTXOs with MMR nodes inserted into database",
+        //                 //     utxo_hashes.len()
+        //                 // );
+        //
+        //                 // break;
+        //             },
+        //             Err(err @ HorizonSyncError::EmptyResponse { .. }) |
+        //             Err(err @ HorizonSyncError::IncorrectResponse { .. }) => {
+        //                 warn!(
+        //                     target: LOG_TARGET,
+        //                     "Invalid UTXOs or MMR Nodes received from peer. {}", err
+        //                 );
+        //                 if (sync_peer1 == sync_peer2) && (sync_peer1 == sync_peer3) {
+        //                     debug!(
+        //                         target: LOG_TARGET,
+        //                         "Banning peer {} from local node, because they supplied invalid UTXOs or MMR Nodes",
+        //                         sync_peer1
+        //                     );
+        //
+        //                     self.ban_sync_peer(&sync_peer1, "Peer supplied invalid UTXOs or MMR Nodes".to_string())
+        //                         .await?;
+        //                 }
+        //             },
+        //             Err(e) => return Err(e),
+        //         };
+        //
+        //         debug!(target: LOG_TARGET, "Retrying kernel sync. Attempt {}", attempt);
+        //         if attempt == num_sync_peers {
+        //             return Err(HorizonSyncError::MaxSyncAttemptsReached);
+        //         }
+        //     }
+        // }
+        //
+        // self.validate_mmr_root(MmrTree::Utxo).await?;
+        // self.validate_mmr_root(MmrTree::RangeProof).await?;
+        // Ok(())
+        unimplemented!("utxos and rangeproofs")
     }
 
     // Finalize the horizon state synchronization by setting the chain metadata to the local tip and committing
